@@ -10,6 +10,11 @@ set(CMAKE_VISIBILITY_INLINES_HIDDEN YES)
 
 add_library("${PROJECT_NAME}_compiler_flags" INTERFACE)
 
+option(NOOPENSSL "Disable OpenSSL" OFF)
+if (NOOPENSSL)
+    add_definitions(-DNOOPENSSL=1)
+endif (NOOPENSSL)
+
 if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.15")
     target_compile_features("${PROJECT_NAME}_compiler_flags" INTERFACE "c_std_${CMAKE_C_STANDARD}")
 
@@ -18,14 +23,15 @@ if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.15")
     target_compile_options(
             "${PROJECT_NAME}_compiler_flags"
             INTERFACE
-            "$<$<AND:${gcc_like},$<CONFIG:Debug>>:$<BUILD_INTERFACE:-Wshadow;-Wformat=2;-Wall;-Wno-missing-braces;-Wno-long-long;-pedantic;-fprofile-arcs;-ftest-coverage>>"
+            # "$<$<AND:${gcc_like},$<CONFIG:Debug>>:$<BUILD_INTERFACE:-Wshadow;-Wformat=2;-Wall;-Wno-missing-braces;-Wno-long-long;-pedantic;-fprofile-arcs;-ftest-coverage>>"
+            "$<${gcc_like}:$<BUILD_INTERFACE:-Wshadow;-Wformat=2;-Wall;-pedantic>>"
             "$<${msvc}:$<BUILD_INTERFACE:-W3;-WX;-Zi;-permissive->>"
     )
-    target_link_options(
-            "${PROJECT_NAME}_compiler_flags"
-            INTERFACE
-            "$<$<AND:${gcc_like},$<CONFIG:Debug>>:$<BUILD_INTERFACE:--coverage>>"
-    )
+    #target_link_options(
+    #        "${PROJECT_NAME}_compiler_flags"
+    #        INTERFACE
+    #        "$<$<AND:${gcc_like},$<CONFIG:Debug>>:$<BUILD_INTERFACE:--coverage>>"
+    #)
     target_compile_features("${PROJECT_NAME}_compiler_flags" INTERFACE "c_std_${CMAKE_C_STANDARD}")
 endif (CMAKE_VERSION VERSION_GREATER_EQUAL "3.15")
 

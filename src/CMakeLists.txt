@@ -53,6 +53,17 @@ source_group("Source Files" FILES "${Source_Files}")
 
 add_library("${LIBRARY_NAME}" "${Header_Files}" "${Source_Files}")
 
+set(gitinfo "${CMAKE_CURRENT_BINARY_DIR}/gitinfo.h")
+#if (NOT EXISTS "${gitinfo}")
+execute_process(COMMAND git rev-parse --short HEAD OUTPUT_VARIABLE GIT_HASH OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND git describe --tags OUTPUT_VARIABLE GITVERS OUTPUT_STRIP_TRAILING_WHITESPACE)
+configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/gitinfo.h.in"
+        "${gitinfo}"
+        @ONLY
+)
+#endif (NOT EXISTS "${gitinfo}")
+
 include(GenerateExportHeader)
 set(_export_file "${CMAKE_CURRENT_BINARY_DIR}/${LIBRARY_NAME}_export.h")
 generate_export_header("${LIBRARY_NAME}" EXPORT_FILE_NAME "${_export_file}")
@@ -73,6 +84,14 @@ target_link_libraries(
         PRIVATE
         "${PROJECT_NAME}_compiler_flags"
 )
+if (NOT NOOPENSSL)
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(
+            "${LIBRARY_NAME}"
+            PRIVATE
+            OpenSSL::SSL
+    )
+endif (NOT NOOPENSSL)
 
 set_target_properties("${LIBRARY_NAME}" PROPERTIES LINKER_LANGUAGE C)
 
@@ -86,12 +105,6 @@ set(Exec_Source_Files "main.c")
 source_group("${EXEC_NAME} Source Files" FILES "${Exec_Source_Files}")
 
 add_executable("${EXEC_NAME}" "${Exec_Source_Files}")
-
-target_link_libraries(
-        "${EXEC_NAME}"
-        PUBLIC
-        "${LIBRARY_NAME}"
-)
 
 target_link_libraries("${EXEC_NAME}" PRIVATE "${LIBRARY_NAME}")
 set_target_properties("${EXEC_NAME}" PROPERTIES LINKER_LANGUAGE C)
@@ -121,5 +134,5 @@ install(TARGETS ${installable_libs}
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(EXPORT "${LIBRARY_NAME}Targets" DESTINATION "${CMAKE_INSTALL_DATADIR}/${LIBRARY_NAME}")
 
-install(FILES ${Header_Files} "${_export_file}"
+install(FILES ${Header_Files} "${_export_file}" "${gitinfo}"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")

@@ -88,6 +88,15 @@ host address.
 ./pogocache -h 172.30.2.84
 ```
 
+## CMake (alternative build)
+
+```sh
+$ cmake -S . -B build
+$ cmake --build build
+$ build/bin/pogocache_cli --version
+pogocache 1.0.0-1-g9e47ab5
+```
+
 <details>
 <summary>
 
