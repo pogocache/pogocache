@@ -93,7 +93,7 @@ host address.
 ```sh
 $ cmake -S . -B build
 $ cmake --build build
-$ build/bin/pogocache_cli --version
+$ build/bin/pogocache --version
 pogocache 1.0.0-1-g9e47ab5
 ```
 

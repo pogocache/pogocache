@@ -3,7 +3,8 @@ cmake_minimum_required(VERSION 3.11)
 project(pogocache VERSION 0.0.1 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_STANDARD_REQUIRED ON)
+#set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS ON)
 set(CMAKE_C_VISIBILITY_PRESET hidden)
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN YES)
@@ -24,7 +25,7 @@ if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.15")
             "${PROJECT_NAME}_compiler_flags"
             INTERFACE
             # "$<$<AND:${gcc_like},$<CONFIG:Debug>>:$<BUILD_INTERFACE:-Wshadow;-Wformat=2;-Wall;-Wno-missing-braces;-Wno-long-long;-pedantic;-fprofile-arcs;-ftest-coverage>>"
-            "$<${gcc_like}:$<BUILD_INTERFACE:-Wshadow;-Wformat=2;-Wall;-pedantic>>"
+            "$<${gcc_like}:$<BUILD_INTERFACE:-Wshadow;-Wformat=2;-Wall;-pedantic;-Wno-gnu-statement-expression;-Wno-format-nonliteral>>"
             "$<${msvc}:$<BUILD_INTERFACE:-W3;-WX;-Zi;-permissive->>"
     )
     #target_link_options(
@@ -32,7 +33,17 @@ if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.15")
     #        INTERFACE
     #        "$<$<AND:${gcc_like},$<CONFIG:Debug>>:$<BUILD_INTERFACE:--coverage>>"
     #)
-    target_compile_features("${PROJECT_NAME}_compiler_flags" INTERFACE "c_std_${CMAKE_C_STANDARD}")
+    target_compile_features(
+            "${PROJECT_NAME}_compiler_flags"
+            INTERFACE
+            "c_std_${CMAKE_C_STANDARD}"
+    )
+    set_target_properties(
+            "${PROJECT_NAME}_compiler_flags"
+            PROPERTIES
+            C_STANDARD "${CMAKE_C_STANDARD}"
+            C_EXTENSIONS ON
+    )
 endif (CMAKE_VERSION VERSION_GREATER_EQUAL "3.15")
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows"

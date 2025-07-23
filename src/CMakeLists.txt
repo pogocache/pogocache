@@ -2,7 +2,7 @@
 # Library #
 ###########
 
-set(LIBRARY_NAME "${PROJECT_NAME}")
+set(LIBRARY_NAME "lib${PROJECT_NAME}")
 
 set(Header_Files
         "args.h"
@@ -99,7 +99,7 @@ set_target_properties("${LIBRARY_NAME}" PROPERTIES LINKER_LANGUAGE C)
 # CLI #
 #######
 
-set(EXEC_NAME "${PROJECT_NAME}_cli")
+set(EXEC_NAME "${PROJECT_NAME}")
 
 set(Exec_Source_Files "main.c")
 source_group("${EXEC_NAME} Source Files" FILES "${Exec_Source_Files}")

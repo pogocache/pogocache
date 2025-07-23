@@ -1868,10 +1868,10 @@ static void stats(struct conn *conn) {
 
 static void cmdSTATS(struct conn *conn, struct args *args) {
     if (args->len == 1) {
-        return stats(conn);
+        stats(conn);
+        return;
     }
     conn_write_error(conn, ERR_SYNTAX_ERROR);
-    return;
 }
 
 // Commands hash table. Lazy loaded per thread.
