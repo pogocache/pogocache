@@ -94,7 +94,7 @@ host address.
 $ cmake -S . -B build
 $ cmake --build build
 $ build/bin/pogocache --version
-pogocache 1.0.0-1-g9e47ab5
+pogocache 1.0.0-3-ge7496ed
 ```
 
 <details>

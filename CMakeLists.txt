@@ -16,6 +16,16 @@ if (NOOPENSSL)
     add_definitions(-DNOOPENSSL=1)
 endif (NOOPENSSL)
 
+if (LINUX)
+    option(NOURING "Disable building with uring" OFF)
+else ()
+    set(NOURING 1)
+endif ()
+
+if (NOURING)
+    add_definitions(-DNOURING=1)
+endif (NOURING)
+
 if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.15")
     target_compile_features("${PROJECT_NAME}_compiler_flags" INTERFACE "c_std_${CMAKE_C_STANDARD}")
 
