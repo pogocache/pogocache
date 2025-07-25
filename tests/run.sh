@@ -39,7 +39,7 @@ fi
 CCSANI=1 make -C ..
 
 # Run Pogocache
-../pogocache --shards=128 &
+../pogocache --shards=128 --cas=yes &
 sleep 0.1
 
 

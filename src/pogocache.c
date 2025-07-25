@@ -1109,6 +1109,7 @@ static void shard_deinit(struct shard *shard, struct pgctx *ctx) {
 static bool shard_init(struct shard *shard, struct pgctx *ctx) {
     memset(shard, 0, sizeof(struct shard));
     lock_init(shard);
+    shard->cas = 1;
     if (!map_init(&shard->map, INITCAP, ctx)) {
         // nomem
         shard_deinit(shard, ctx);
@@ -1383,9 +1384,9 @@ static int loadop(const void *key, size_t keylen,
         if (update) {
             // User wants to update the entry.
             shard->cas++;
-            cas = shard->cas;
             struct entry *entry2 = entry_new(key, keylen, update->value,
-                update->valuelen, update->expires, update->flags, cas, ctx);
+                update->valuelen, update->expires, update->flags, shard->cas, 
+                ctx);
             if (!entry2) {
                 return POGOCACHE_NOMEM;
             }
@@ -1492,7 +1493,6 @@ static int storeop(const void *key, size_t keylen, const void *val,
     } else if (opts->ttl > 0) {
         expires = int64_add_clamp(now, opts->ttl);
     }
-    uint64_t cas = opts->cas; // use a standalone variable, may mutate
     if (opts->keepttl) {
         // User wants to keep the existing ttl. Get the existing entry from the
         // map first and take its expiration.
@@ -1505,16 +1505,9 @@ static int storeop(const void *key, size_t keylen, const void *val,
             }
         }
     }
-    if (ctx->usecas) {
-        if (cas == 0) {
-            shard->cas++;
-            cas = shard->cas;
-        } else if (cas > shard->cas) {
-            shard->cas = cas;
-        }
-    }
+    shard->cas++;
     struct entry *entry = entry_new(key, keylen, val, vallen, expires,
-        opts->flags, cas, ctx);
+        opts->flags, shard->cas, ctx);
     if (!entry) {
         goto nomem;
     }
@@ -1554,7 +1547,7 @@ static int storeop(const void *key, size_t keylen, const void *val,
             // User is requesting the cas operation.
             if (ctx->usecas) {
                 uint64_t old_cas = entry_cas(old);
-                if (cas != old_cas) {
+                if (opts->cas != old_cas) {
                     // CAS test failed.
                     // printf(". cas failed: expected %" PRIu64 ", "
                     //     "got %" PRIu64 "\n", cas, old_cas);
