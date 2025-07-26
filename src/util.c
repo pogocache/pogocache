@@ -271,12 +271,12 @@ size_t u64toa(uint64_t x, uint8_t *data) {
         data[0] = '0'+x;
         return 1;
     }
-    int i = 0;
+    size_t i = 0;
     do {
         data[i++] = '0' + x % 10;
     } while ((x /= 10) > 0);
     // reverse the characters
-    for (int j = 0, k = i-1; j < k; j++, k--) {
+    for (size_t j = 0, k = i-1; j < k; j++, k--) {
         uint8_t ch = data[j];
         data[j] = data[k];
         data[k] = ch;

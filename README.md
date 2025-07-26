@@ -88,6 +88,14 @@ host address.
 ./pogocache -h 172.30.2.84
 ```
 
+**Docker**
+
+Run Pogocache using the latest Docker image.
+
+```sh
+docker run --net=host pogocache/pogocache
+```
+
 ## CMake (alternative build)
 
 ```sh
