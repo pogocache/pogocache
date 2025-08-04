@@ -19,6 +19,8 @@ func TestMemcache(t *testing.T) {
 	if err := mc.FlushAll(); err != nil {
 		t.Fatal(err)
 	}
+	defer mc.Close()
+
 	keys := make(map[string]string)
 	for len(keys) < 10000 {
 		key := randString(128)
