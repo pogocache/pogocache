@@ -317,51 +317,55 @@ static void cmdSETEX(struct conn *conn, struct args *args) {
         0);
 }
 
+enum get_entry_kind {
+    KIND_GET, KIND_MGET, KIND_MGETS, 
+};
+
 struct get_entry_context {
     struct conn *conn;
-    bool cas;
-    bool mget;
+    enum get_entry_kind kind;
 };
 
 static void get_entry(int shard, int64_t time, const void *key, size_t keylen,
     const void *val, size_t vallen, int64_t expires, uint32_t flags,
     uint64_t cas, struct pogocache_update **update, void *udata)
 {
-    (void)key, (void)keylen, (void)cas;
     (void)shard, (void)time, (void)expires, (void)flags, (void)update;
     struct get_entry_context *ctx = udata;
-    int x;
     uint8_t buf[24];
-    size_t n;
     switch (conn_proto(ctx->conn)) {
     case PROTO_POSTGRES:;
+        char flagsbuf[24];
+        size_t flagsn = snprintf(flagsbuf, sizeof(flagsbuf), "%" PRIu32, flags);
         char casbuf[24];
-        if (ctx->cas) {
-            x = 1;
-            n = snprintf(casbuf, sizeof(casbuf), "%" PRIu64, cas);
-        } else {
-            x = 0;
-            casbuf[0] = '\0';
-            n = 0;
-        }
-        if (ctx->mget) {
-            pg_write_row_data(ctx->conn, (const char*[]){ key, val, casbuf }, 
-                (size_t[]){ keylen, vallen, n }, 2+x);
-        } else {
-            pg_write_row_data(ctx->conn, (const char*[]){ val, casbuf }, 
-                (size_t[]){ vallen, n }, 1+x);
+        size_t casn = snprintf(casbuf, sizeof(casbuf), "%" PRIu64, cas);
+        switch (ctx->kind) {
+        case KIND_GET:
+            pg_write_row_data(ctx->conn, (const char*[]){ val, }, 
+                (size_t[]){ vallen }, 1);
+            break;
+        case KIND_MGET:
+            pg_write_row_data(ctx->conn, (const char*[]){ key, val }, 
+                (size_t[]){ keylen, vallen }, 2);
+            break;
+        case KIND_MGETS:
+            pg_write_row_data(ctx->conn, 
+                (const char*[]){ key, flagsbuf, casbuf, val }, 
+                (size_t[]){ keylen, flagsn, casn, vallen }, 
+                4);
+            break;
         }
         break;
     case PROTO_MEMCACHE:
         conn_write_raw(ctx->conn, "VALUE ", 6);
         conn_write_raw(ctx->conn, key, keylen);
-        n = u64toa(flags, buf);
+        size_t n = u64toa(flags, buf);
         conn_write_raw(ctx->conn, " ", 1);
         conn_write_raw(ctx->conn, buf, n);
         n = u64toa(vallen, buf);
         conn_write_raw(ctx->conn, " ", 1);
         conn_write_raw(ctx->conn, buf, n);
-        if (ctx->cas) {
+        if (ctx->kind == KIND_MGETS) {
             n = u64toa(cas, buf);
             conn_write_raw(ctx->conn, " ", 1);
             conn_write_raw(ctx->conn, buf, n);
@@ -374,11 +378,13 @@ static void get_entry(int shard, int64_t time, const void *key, size_t keylen,
         conn_write_http(ctx->conn, 200, "OK", val, vallen);
         break;
     default:
-        if (ctx->cas) {
-            conn_write_array(ctx->conn, 2);
+        if (ctx->kind == KIND_MGETS) {
+            conn_write_array(ctx->conn, 3);
+            conn_write_uint(ctx->conn, flags);
             conn_write_uint(ctx->conn, cas);
         }
         conn_write_bulk(ctx->conn, val, vallen);
+        break;
     }
 }
 
@@ -433,7 +439,7 @@ static void cmdGET(struct conn *conn, struct args *args) {
     }
 }
 
-// MGET key [key...]
+// MGET(S) key [key...]
 static void cmdMGET(struct conn *conn, struct args *args) {
     if (args->len < 2) {
         conn_write_error(conn, ERR_WRONG_NUM_ARGS);
@@ -442,8 +448,7 @@ static void cmdMGET(struct conn *conn, struct args *args) {
     int64_t now = sys_now();
     struct get_entry_context ctx = { 
         .conn = conn,
-        .mget = true,
-        .cas = argeq(args, 0, "mgets"),
+        .kind = argeq(args, 0, "mgets") ? KIND_MGETS : KIND_MGET,
     };
     struct pogocache_load_opts opts = {
         .time = now,
@@ -453,8 +458,13 @@ static void cmdMGET(struct conn *conn, struct args *args) {
     int count = 0;
     int proto = conn_proto(conn);
     if (proto == PROTO_POSTGRES) {
-        pg_write_row_desc(conn, (const char*[]){ "key", "value", "cas" }, 
-            2+(ctx.cas?1:0));
+        if (ctx.kind == KIND_MGETS) {
+            const char *rows[] = {"key", "flags", "cas", "value"};
+            pg_write_row_desc(conn, rows, 4);
+        } else {
+            const char *rows[] = {"key", "value"};
+            pg_write_row_desc(conn, rows, 2);
+        }
     } else if (proto == PROTO_RESP) {
         conn_write_array(conn, args->len-1);
     }
