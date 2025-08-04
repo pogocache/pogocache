@@ -33,9 +33,11 @@ void buf_ensure(struct buf *buf, size_t len) {
 }
 
 void buf_append(struct buf *buf, const void *data, size_t len){
-    buf_ensure(buf, len);
-    memcpy(buf->data+buf->len, data, len);
-    buf->len += len;
+    if (len > 0) {
+        buf_ensure(buf, len);
+        memcpy(buf->data+buf->len, data, len);
+        buf->len += len;
+    }
 }
 
 void buf_append_byte(struct buf *buf, char byte) {
