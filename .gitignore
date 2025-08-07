@@ -26,3 +26,8 @@ pogocache
 pogocache-sani
 data/
 
+/.idea/.gitignore
+/.idea/misc.xml
+/.idea/vcs.xml
+.idea/editor.xml
+.env
