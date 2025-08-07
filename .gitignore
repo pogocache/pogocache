@@ -24,5 +24,10 @@ test
 pogocache-start.sh
 pogocache
 pogocache-sani
+pogocache.wasm
+pogocache.wasm.map
+pogocache.js
+pogocache.html
+pogocache2.html
 data/
 

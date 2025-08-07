@@ -286,9 +286,13 @@ size_t u64toa(uint64_t x, uint8_t *data) {
 
 size_t i64toa(int64_t x, uint8_t *data) {
     if (x < 0) {
+        if (x == INT64_MIN) {
+            memcpy(data, "-9223372036854775808", 20);
+            return 20;
+        }
         data[0] = '-';
         data++;
-        return u64toa(x * -1, data) + 1;
+        return u64toa(-x, data) + 1;
     }
     return u64toa(x, data);
 }

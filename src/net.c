@@ -37,6 +37,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/epoll.h>
+#elif defined(__EMSCRIPTEN__)
+#include <emscripten/html5.h>
 #else
 #include <sys/event.h>
 #endif
@@ -105,6 +107,8 @@ static int setkeepalive(int fd, bool keepalive) {
 
 #ifdef __linux__
 typedef struct epoll_event event_t;
+#elif defined(__EMSCRIPTEN__)
+typedef int event_t;
 #else
 typedef struct kevent event_t;
 #endif
@@ -112,6 +116,9 @@ typedef struct kevent event_t;
 static int event_fd(event_t *ev) {
 #ifdef __linux__
     return ev->data.fd;
+#elif defined(__EMSCRIPTEN__)
+    (void)ev;
+    return 0;
 #else
     return ev->ident;
 #endif
@@ -123,6 +130,10 @@ static int getevents(int fd, event_t evs[], int nevs, bool wait_forever,
     if (wait_forever) {
 #ifdef __linux__
         return epoll_wait(fd, evs, nevs, -1);
+#elif defined(__EMSCRIPTEN__)
+        (void)fd, (void)evs, (void)nevs;
+        errno = EPERM;
+        return -1;
 #else
         return kevent(fd, NULL, 0, evs, nevs, 0);
 #endif
@@ -133,6 +144,9 @@ static int getevents(int fd, event_t evs[], int nevs, bool wait_forever,
 #ifdef __linux__
         timeout = timeout / 1000000;
         return epoll_wait(fd, evs, nevs, timeout);
+#elif defined(__EMSCRIPTEN__)
+        errno = EPERM;
+        return -1;
 #else
         struct timespec timespec = { .tv_nsec = timeout };
         return kevent(fd, NULL, 0, evs, nevs, &timespec);
@@ -146,6 +160,10 @@ static int addread(int qfd, int fd) {
     ev.events = EPOLLIN | EPOLLEXCLUSIVE;
     ev.data.fd = fd;
     return epoll_ctl(qfd, EPOLL_CTL_ADD, fd, &ev);
+#elif defined(__EMSCRIPTEN__)
+    (void)qfd, (void)fd;
+    errno = EPERM;
+    return -1;
 #else
     struct kevent ev={.filter=EVFILT_READ,.flags=EV_ADD,.ident=(fd)};
     return kevent(qfd, &ev, 1, NULL, 0, NULL);
@@ -158,6 +176,10 @@ static int delread(int qfd, int fd) {
     ev.events = EPOLLIN;
     ev.data.fd = fd;
     return epoll_ctl(qfd, EPOLL_CTL_DEL, fd, &ev);
+#elif defined(__EMSCRIPTEN__)
+    (void)qfd, (void)fd;
+    errno = EPERM;
+    return -1;
 #else
     struct kevent ev={.filter=EVFILT_READ,.flags=EV_DELETE,.ident=(fd)};
     return kevent(qfd, &ev, 1, NULL, 0, NULL);
@@ -170,6 +192,10 @@ static int addwrite(int qfd, int fd) {
     ev.events = EPOLLOUT;
     ev.data.fd = fd;
     return epoll_ctl(qfd, EPOLL_CTL_ADD, fd, &ev);
+#elif defined(__EMSCRIPTEN__)
+    (void)qfd, (void)fd;
+    errno = EPERM;
+    return -1;
 #else
     struct kevent ev={.filter=EVFILT_WRITE,.flags=EV_ADD,.ident=(fd)};
     return kevent(qfd, &ev, 1, NULL, 0, NULL);
@@ -182,6 +208,10 @@ static int delwrite(int qfd, int fd) {
     ev.events = EPOLLOUT;
     ev.data.fd = fd;
     return epoll_ctl(qfd, EPOLL_CTL_DEL, fd, &ev);
+#elif defined(__EMSCRIPTEN__)
+    (void)qfd, (void)fd;
+    errno = EPERM;
+    return -1;
 #else
     struct kevent ev={.filter=EVFILT_WRITE,.flags=EV_DELETE,.ident=(fd)};
     return kevent(qfd, &ev, 1, NULL, 0, NULL);
@@ -191,6 +221,9 @@ static int delwrite(int qfd, int fd) {
 static int evqueue(void) {
 #ifdef __linux__
     return epoll_create1(0);
+#elif defined(__EMSCRIPTEN__)
+    errno = EPERM;
+    return -1;
 #else
     return kqueue();
 #endif
@@ -935,11 +968,13 @@ static int listen_tcp(const char *host, const char *port, bool reuseport,
             abort();
         }
     }
+#ifndef __EMSCRIPTEN__
     ret = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &(int){1},sizeof(int));
     if (ret == -1) {
         perror("# setsockopt(reuseaddr)");
         abort();
     }
+#endif
     ret = setnonblock(fd);
     if (ret == -1) {
         perror("# setnonblock");
@@ -1108,16 +1143,39 @@ static void *thwarmup(void *arg) {
     return 0;
 }
 
+#ifdef __EMSCRIPTEN__
+static struct net_opts *exec_opts = 0;
+static void emscripten_start(struct net_opts *opts) {
+    exec_opts = opts;
+    opts->listening(opts->udata);
+}
+char *exec_command(const char *command) {
+    struct net_conn *conn = conn_new(0, 0);
+    exec_opts->opened(conn, exec_opts->udata);
+    exec_opts->data(conn, command, strlen(command), exec_opts->udata);
+    char *ptr = xmalloc(conn->outlen+1);
+    memcpy(ptr, conn->out, conn->outlen);
+    ptr[conn->outlen] = '\0';
+    exec_opts->closed(conn, exec_opts->udata);
+    conn_free(conn);
+    return ptr;
+}
+#endif
+
 void net_main(struct net_opts *opts) {
-    (void)delread;
     int sfd[3] = {
         listen_tcp(opts->host, opts->port, opts->reuseport, opts->backlog),
         listen_unixsock(opts->unixsock, opts->backlog),
         listen_tcp(opts->host, opts->tlsport, opts->reuseport, opts->backlog),
     };
     if (!sfd[0] && !sfd[1] && !sfd[2]) {
+#ifdef __EMSCRIPTEN__
+        emscripten_start(opts);
+        return;
+#else
         printf("# No listeners provided\n");
         abort();
+#endif
     }
     opts->listening(opts->udata);
     struct qthreadctx *ctxs = xmalloc(sizeof(struct qthreadctx)*opts->nthreads);
@@ -1196,6 +1254,12 @@ static void *bgwork(void *arg) {
 bool net_conn_bgwork(struct net_conn *conn, void (*work)(void *udata), 
     void (*done)(struct net_conn *conn, void *udata), void *udata)
 {
+#ifdef __EMSCRIPTEN__
+    // run in foreground
+    work(udata);
+    done(conn, udata);
+    return true;
+#endif
     if (conn->bgctx || conn->closed) {
         return false;
     }

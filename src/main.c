@@ -223,6 +223,9 @@ fail:
 }
 
 static size_t setmaxrlimit(void) {
+#ifdef __EMSCRIPTEN__
+    return 0;
+#endif
     size_t maxconns = 0;
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
@@ -298,24 +301,23 @@ void sigterm(int sig) {
     if (sig == SIGINT || sig == SIGTERM) {
         if (!atomic_load(&loaded) || !*persist) {
             printf("# Pogocache exiting now\n");
-            _Exit(0);
+            exit(0);
         }
         if (*persist) {
             printf("* Saving data to %s, please wait...\n", persist);
             int ret = save(persist, true);
             if (ret != 0) {
                 perror("# Save failed");
-                _Exit(1);
+                exit(1);
             }
             printf("# Pogocache exiting now\n");
-            _Exit(0);
+            exit(0);
         }
-
         int count = atomic_fetch_add(&shutdownreq, 1);
         if (count > 0 && sig == SIGINT) {
             printf("# User forced shutdown\n");
             printf("# Pogocache exiting now\n");
-            _Exit(0);
+            exit(0);
         }
     }
 }
@@ -421,8 +423,10 @@ int main(int argc, char *argv[]) {
     version = GITVERS;
     githash = GITHASH;
 
-    
-
+#ifdef __EMSCRIPTEN__
+    port = "0";
+    usecas = "yes";
+#endif
 
     if (uring_available()) {
         uring = "yes";

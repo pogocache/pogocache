@@ -91,7 +91,7 @@ static int flush(struct savectx *ctx) {
     ctx->buf.len = 0;
     ctx->nentries = 0;
     return ok ? 0 : -1;
-};
+}
 
 static int save_entry(int shard, int64_t time, const void *key, size_t keylen,
     const void *value, size_t valuelen, int64_t expires, uint32_t flags,

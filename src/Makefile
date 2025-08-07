@@ -1,3 +1,18 @@
+ifeq ($(CC), emcc)
+NOURING := 1
+NOOPENSSL := 1
+CFLAGS := -Wall -Wextra -Werror -O3 $(CFLAGS)
+LDFLAGS := -sASSERTIONS=1 -sINITIAL_MEMORY=64MB \
+    -sEXPORTED_FUNCTIONS='["_malloc","_free","_exec_command","_add_time","_main"]' \
+    -sEXPORTED_RUNTIME_METHODS='[ \
+        "ccall","cwrap","stringToUTF8","UTF8ToString" \
+    ]' \
+    $(LDFLAGS)
+
+CNODEFFLAGS=1
+OUTEXT=.html
+endif
+
 ifndef CNODEFFLAGS
 ifdef CCSANI
 SFLAGS := -O0 -g3 -Wall -Wextra -Werror -fsanitize=address 
@@ -47,7 +62,7 @@ OBJS += net.o xmalloc.o main.o pogocache.o resp.o http.o
 OBJS += hashmap.o
 
 ../pogocache: $(DEPS) $(OBJS)
-	$(CC) $(CFLAGS) -o ../pogocache $(OBJS) $(CLIBS)
+	$(CC) $(CFLAGS) -o ../pogocache$(OUTEXT) $(LDFLAGS) $(OBJS) $(CLIBS)
 
 clean:
 	rm -rf *.o *.dSYM *.out *.a gitinfo.h ../pogocache

@@ -27,6 +27,8 @@
 #ifdef __APPLE__
 #include <mach/mach_time.h>
 #include <mach/mach.h>
+#elif defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
 #endif
 #include "sys.h"
 
@@ -63,7 +65,7 @@ int sys_nprocs(void) {
     return nprocs;
 }
 
-#ifndef __linux__
+#if !defined(__linux__) && !defined(__EMSCRIPTEN__)
 #include <sys/sysctl.h>
 #endif
 
@@ -96,6 +98,11 @@ size_t sys_memory(void) {
         }
         fclose(f);
     }
+#elif defined(__EMSCRIPTEN__)
+    size_t heap_size = EM_ASM_INT({
+        return HEAP8.buffer.byteLength;
+    });
+    return heap_size;
 #else
     size_t memsize = 0;
     size_t len = sizeof(memsize);
@@ -103,14 +110,13 @@ size_t sys_memory(void) {
         sysmem = memsize;
     }
 #endif
-    if (sysmem == 0) {
-        fprintf(stderr, "# could not detect total system memory, bailing\n");
-        exit(1);
-    }
     return sysmem;
 }
 
 uint64_t sys_seed(void) {
+#ifdef __EMSCRIPTEN__
+    return 0;
+#else
     #define NSEEDCAP 64
     static __thread int nseeds = 0;
     static __thread uint64_t seeds[NSEEDCAP];
@@ -128,12 +134,23 @@ uint64_t sys_seed(void) {
         nseeds = NSEEDCAP;
     }
     return seeds[--nseeds];
+#endif
 }
+
+#ifdef __EMSCRIPTEN__
+static int64_t add_time_delta = 0;
+void add_time(int extra_milliseconds) {
+    add_time_delta += (int64_t)extra_milliseconds * (int64_t)1000000;
+}
+#endif
 
 static int64_t nanotime(struct timespec *ts) {
     int64_t x = ts->tv_sec;
     x *= 1000000000;
     x += ts->tv_nsec;
+#ifdef __EMSCRIPTEN__
+    x += add_time_delta;
+#endif
     return x;
 }
 
@@ -169,6 +186,11 @@ void sys_getmeminfo(struct sys_meminfo *info) {
     }
     info->virt = taskInfo.virtual_size;
     info->rss = taskInfo.resident_size;
+}
+#elif defined(__EMSCRIPTEN__) 
+void sys_getmeminfo(struct sys_meminfo *info) {
+    info->virt = 0;
+    info->rss = 0;
 }
 #elif __linux__
 void sys_getmeminfo(struct sys_meminfo *info) {

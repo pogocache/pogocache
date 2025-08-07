@@ -1836,6 +1836,8 @@ static void stats(struct conn *conn) {
     stats_printf(&stats, "version %s", version);
     stats_printf(&stats, "githash %s", githash);
     stats_printf(&stats, "pointer_size %zu", sizeof(uintptr_t)*8);
+#ifdef __EMSCRIPTEN__
+#else
     struct rusage usage;
     if (getrusage(RUSAGE_SELF, &usage) == 0) {
         stats_printf(&stats, "rusage_user %ld.%06ld",
@@ -1843,6 +1845,7 @@ static void stats(struct conn *conn) {
         stats_printf(&stats, "rusage_system %ld.%06ld",
             usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
     }
+#endif
     stats_printf(&stats, "max_connections %zu", maxconns);
     stats_printf(&stats, "curr_connections %zu", net_nconns());
     stats_printf(&stats, "total_connections %zu", net_tconns());
@@ -1878,7 +1881,8 @@ static void stats(struct conn *conn) {
 
 static void cmdSTATS(struct conn *conn, struct args *args) {
     if (args->len == 1) {
-        return stats(conn);
+        stats(conn);
+        return;
     }
     conn_write_error(conn, ERR_SYNTAX_ERROR);
     return;
@@ -2000,13 +2004,14 @@ void evcommand(struct conn *conn, struct args *args) {
     if (cmd) {
         cmd->func(conn, args);
     } else {
+        char *errmsg = xmalloc(256);
+        snprintf(errmsg, 256, "ERR unknown command '%.*s'",
+            (int)args->bufs[0].len, args->bufs[0].data);
+        conn_write_error(conn, errmsg);
+        xfree(errmsg);
         if (verb > 0) {
             printf("# Unknown command '%.*s'\n", (int)args->bufs[0].len,
                 args->bufs[0].data);
         }
-        char errmsg[128];
-        snprintf(errmsg, sizeof(errmsg), "ERR unknown command '%.*s'", 
-            (int)args->bufs[0].len, args->bufs[0].data);
-        conn_write_error(conn, errmsg);
     }
 }

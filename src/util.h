@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "args.h"
 
 #define NANOSECOND  INT64_C(1)
@@ -21,7 +22,6 @@
 #define SECOND      INT64_C(1000000000)
 #define MINUTE      INT64_C(60000000000)
 #define HOUR        INT64_C(3600000000000)
-
 
 const char *memstr(double size, char buf[64]);
 const char *memstr_long(double size, char buf[64]);

@@ -36,6 +36,10 @@ ssize_t parse_postgres(const char *data, size_t len, struct args *args,
     struct pg **pg);
 
 static bool sniff_proto(const char *data, size_t len, int *proto) {
+#ifdef __EMSCRIPTEN__
+    *proto = PROTO_RESP;
+    return true;
+#endif
     if (len > 0 && data[0] == '*') {
         *proto = PROTO_RESP;
         return true;
@@ -137,4 +141,3 @@ fail:
     parse_seterror("ERROR");
     return -1;
 }
-
