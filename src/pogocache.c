@@ -1873,8 +1873,6 @@ static int sweepop(struct shard *shard, int shardidx, int64_t now,
 /// Remove expired entries from the cache.
 /// There's an option to allow for isolating the operation to a single shard.
 /// The final 'kept' or 'swept' counts are returned.
-/// @return POGOCACHE_FINISHED when iteration completed
-/// @return POGOCACHE_CANCELED when iteration stopped early
 void pogocache_sweep(struct pogocache *cache, size_t *swept, size_t *kept, 
     struct pogocache_sweep_opts *opts)
 {

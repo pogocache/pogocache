@@ -1995,8 +1995,9 @@ void evcommand(struct conn *conn, struct args *args) {
             return;
         }
     }
-    if (verb > 1) {
+    if (verb >= 3) {
         if (!argeq(args, 0, "auth")) {
+            printf(". ");
             args_print(args);
         }
     }
@@ -2009,7 +2010,7 @@ void evcommand(struct conn *conn, struct args *args) {
             (int)args->bufs[0].len, args->bufs[0].data);
         conn_write_error(conn, errmsg);
         xfree(errmsg);
-        if (verb > 0) {
+        if (verb >= 1) {
             printf("# Unknown command '%.*s'\n", (int)args->bufs[0].len,
                 args->bufs[0].data);
         }

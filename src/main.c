@@ -60,6 +60,7 @@ char *tlskeyfile = "";        // tls key file
 char *tlscacertfile = "";     // tls ca cert file
 char *uring = "yes";          // use uring (linux only)
 int maxconns = 1024;          // maximum number of sockets
+char *autosweep = "yes";      // perform automatic sweeps of expired entries
 char *noticker = "no";
 char *warmup = "yes";
 
@@ -72,6 +73,7 @@ uint64_t seed;
 size_t sysmem;
 size_t memlimit;
 int verb;           // verbosity, 0=no, 1=verbose, 2=very, 3=extremely
+bool useautosweep;
 bool usesixpack;
 int useallocator;
 bool usetrackallocs;
@@ -170,6 +172,7 @@ static void showhelp(FILE *file) {
     HOPT("--quickack yes/no", "use quickack (linux)", "%s", quickack);
     HOPT("--uring yes/no", "use uring (linux)", "%s", uring);
     HOPT("--loadfactor percent", "hashmap load factor", "%d", loadfactor);
+    HOPT("--autosweep yes/no", "automatic eviction sweeps", "%s", autosweep);
     HOPT("--keysixpack yes/no", "sixpack compress keys", "%s", keysixpack);
     HOPT("--cas yes/no", "use compare and store", "%s", usecas);
     HELP("\n");
@@ -331,17 +334,22 @@ static void tick(void) {
         struct sys_meminfo meminfo;
         sys_getmeminfo(&meminfo);
         size_t memusage = meminfo.rss;
+        if (verb >= 1) {
+            char usage[32], limit[32];
+            printf(". Memory (usage=%s, limit=%s)\n", 
+                memstr(memusage, usage), memstr(memlimit, limit));
+        }
         if (!lowmem) {
             if (memusage > memlimit) {
                 atomic_store(&lowmem, true);
-                if (verb > 0) {
+                if (verb >= 1) {
                     printf("# Low memory mode on\n");
                 }
             }
         } else {
             if (memusage < memlimit) {
                 atomic_store(&lowmem, false);
-                if (verb > 0) {
+                if (verb >= 1) {
                     printf("# Low memory mode off\n");
                 }
             }
@@ -354,6 +362,37 @@ static void tick(void) {
             pogocache_count(cache, 0), xallocs(), net_nconns());
     }
 
+    if (useautosweep) {
+        // Auto sweep shards to remove expired entries.
+        // Choose a random shard. Sweep it. If more than 10% where of the
+        // entries in the shard were expired then immediately sweep all the
+        // shards.
+        const double HIGH_SWEEP = 0.10;
+        int nshards =  pogocache_nshards(cache);
+        uint64_t seed = sys_seed(); // sys_seed is cryptorandom
+        for (int i = 0; i < nshards; i++) {
+            int sidx = (seed+i)%nshards;
+            struct pogocache_sweep_opts opts = {
+                .oneshard = 1,
+                .oneshardidx = sidx,
+                .time = sys_now(),
+            };
+            size_t swept, kept;
+            pogocache_sweep(cache, &swept, &kept, &opts);
+            double perc = 0.0;
+            if (swept > 0) {
+                perc = (double)swept/(double)(swept+kept);
+            }
+            if (verb >= 2) {
+                double elapsed = (double)(sys_now()-opts.time)/(double)SECOND;
+                printf(". Swept shard %d in %0.f secs (swept=%zu, kept=%zu, "
+                    "%.1f%%)\n", sidx, elapsed, swept, kept, perc); 
+            }
+            if (i == 0 && perc < HIGH_SWEEP) {
+                break;
+            }
+        }
+    }
 }
 
 static void *ticker(void *arg) {
@@ -479,6 +518,7 @@ int main(int argc, char *argv[]) {
             AFLAG("auth", auth = flag)
             AFLAG("persist", persist = flag)
             AFLAG("noticker", noticker = flag)
+            AFLAG("autosweep", autosweep = flag)
             AFLAG("warmup", warmup = flag)
 #ifndef NOOPENSSL
             // TLS flags
@@ -554,6 +594,13 @@ int main(int argc, char *argv[]) {
         maxconns = 1024;
     }
 
+    if (strcmp(autosweep, "yes") == 0) {
+        useautosweep = true;
+    } else if (strcmp(usecas, "no") == 0) {
+        useautosweep = false;
+    } else {
+        INVALID_FLAG("autosweep", autosweep);
+    }
 
 #ifndef __linux__
     bool useuring = false;
@@ -700,10 +747,11 @@ int main(int argc, char *argv[]) {
     printf("* Socket (tcpnodelay: %s, keepalive: %s, quickack: %s)\n",
         tcpnodelay, keepalive, quickack);
     printf("* Threads (threads: %d, queuesize: %d)\n", nthreads, queuesize);
-    printf("* Shards (shards: %d, loadfactor: %d%%)\n", nshards, loadfactor);
+    printf("* Shards (shards: %d, loadfactor: %d%%, autosweep: %s)\n", nshards, 
+        loadfactor, useautosweep?"yes":"no");
     printf("* Security (auth: %s, tlsport: %s)\n", 
         strlen(auth)>0?"enabled":"disabled", *tlsport?tlsport:"none");
-    if (strcmp(noticker,"yes") == 0) {
+    if (strcmp(noticker, "yes") == 0) {
         printf("# NO TICKER\n");
     } else {
         pthread_t th;

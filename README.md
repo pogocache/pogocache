@@ -141,6 +141,7 @@ Advanced options:
   --quickack yes/no      use quickack (linux)           (default: no)
   --uring yes/no         use uring (linux)              (default: yes)
   --loadfactor percent   hashmap load factor            (default: 75)
+  --autosweep yes/no     automatic eviction sweeps      (default: yes)
   --keysixpack yes/no    sixpack compress keys          (default: yes)
   --cas yes/no           use compare and store          (default: no)
 ```
@@ -620,8 +621,9 @@ The other way an entry may be evicted is when the program is low on memory.
 When memory is low the insert operation will automatically choose to evict some older entry, using the [2-random algorithm](https://danluu.com/2choices-eviction/).
 
 Low memory evictions free up memory immediately to make room for new entries.
-Expiration evictions, on the other hand, will not free the memory until the 
-entry's container bucket is accessed, or until the sweep operation is called.
+Expiration evictions, on the other hand, free up eventually using periodic 
+background sweeps. These background sweeps ensure that no more than 10% of the 
+total cache memory is used up by evicted entries.
 
 ## Roadmap and status
 

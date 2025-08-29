@@ -1080,7 +1080,7 @@ static void warmupunix(const char *unixsock, int nsocks) {
             close(socks[i]);
         }
     }
-    if (verb > 1) {
+    if (verb >= 2) {
         printf(". Warmup unix socket (%d/%d)\n", x, nsocks);
     }
     xfree(socks);
@@ -1128,7 +1128,7 @@ static void warmuptcp(const char *host, const char *port, int nsocks) {
             close(socks[i]);
         }
     }
-    if (verb > 1) {
+    if (verb >= 2) {
         printf(". Warmup tcp (%d/%d)\n", x, nsocks);
     }
     xfree(socks);
