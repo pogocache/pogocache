@@ -335,7 +335,7 @@ static void tick(void) {
         sys_getmeminfo(&meminfo);
         size_t memusage = meminfo.rss;
         if (verb >= 1) {
-            char usage[32], limit[32];
+            char usage[64], limit[64];
             printf(". Memory (usage=%s, limit=%s)\n", 
                 memstr(memusage, usage), memstr(memlimit, limit));
         }
