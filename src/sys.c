@@ -122,7 +122,7 @@ uint64_t sys_seed(void) {
     static __thread uint64_t seeds[NSEEDCAP];
     if (nseeds == 0) {
         // Generate a group of new seeds
-        FILE *f = fopen("/dev/urandom", "rb+");
+        FILE *f = fopen("/dev/urandom", "rb");
         if (!f) {
             perror("# /dev/urandom");
             exit(1);
