@@ -1,25 +1,19 @@
-#!/usr/bin/env bash
+#!/bin/sh
 
+vers=2.12
 set -e
-cd $(dirname "${BASH_SOURCE[0]}")
 
-vers=2.10
+cd "$(dirname "$0")"
 
-./download.sh https://github.com/axboe/liburing liburing $vers liburing-$vers
-
-if [[ ! -d "liburing" ]]; then 
+if [ ! -d "liburing" ]; then
     rm -rf liburing/
-    tar -xzf liburing-$vers.tar.gz
-    mv liburing-liburing-$vers liburing
+    git clone --depth 1 --branch liburing-$vers \
+        https://github.com/axboe/liburing.git
 fi
 
 cd liburing
-if [[ ! -f "config.ready" ]]; then
-    ./configure
-    touch config.ready
-fi
 
-if [[ ! -f "build.ready" ]]; then
+if [ ! -f "config.ready" ]; then
     make -j32
-    touch build.ready
+    touch config.ready
 fi
