@@ -68,10 +68,6 @@ OBJS += memcache.o postgres.o tls.o save.o parse.o lz4.o
 OBJS += net.o xmalloc.o main.o pogocache.o resp.o http.o 
 OBJS += hashmap.o
 
-LIBC := $(shell ldd --version 2>&1 | head -n1 | grep -o musl || true)
-
-
-
 ../pogocache: $(DEPS) $(OBJS)
 	$(CC) $(CFLAGS) -o ../pogocache$(OUTEXT) $(LDFLAGS) $(OBJS) $(CLIBS)
 
