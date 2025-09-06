@@ -1,8 +1,8 @@
 #!/bin/sh
 
 vers=2.12
-set -e
 
+set -e
 cd "$(dirname "$0")"
 
 if [ ! -d "liburing" ]; then
@@ -13,7 +13,7 @@ fi
 
 cd liburing
 
-if [ ! -f "config.ready" ]; then
-    make -j32
-    touch config.ready
+if [ ! -f "build.ready" ]; then
+    make -j10
+    touch build.ready
 fi

@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 # ./run.sh [<test-name>]
 
 set -e
