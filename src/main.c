@@ -46,6 +46,7 @@ char *tcpnodelay = "yes";     // disable nagle's algorithm
 char *quickack = "no";        // enable quick acks
 char *usecas = "no";          // enable compare and store
 char *keepalive = "yes";      // socket keepalive setting
+int nshards = 4096;           // number of shards
 int backlog = 1024;           // network socket accept backlog
 int queuesize = 128;          // event queue size
 char *maxmemory = "80%";      // Maximum memory allowed - 80% total system
@@ -78,7 +79,6 @@ bool usesixpack;
 int useallocator;
 bool usetrackallocs;
 bool useevict;
-int nshards;
 bool usetls;        // use tls security (pemfile required);
 bool useauth;       // use auth password
 bool usecolor;      // allow color in terminal
@@ -118,21 +118,8 @@ static void ready(void *udata) {
     } \
     fprintf(file, "\n");
 
-static int calc_nshards(int nprocs) {
-    switch (nprocs) {
-    case 1:  return 64;
-    case 2:  return 128;
-    case 3:  return 256;
-    case 4:  return 512;
-    case 5:  return 1024;
-    case 6:  return 2048;
-    default: return 4096;
-    }
-}
-
 static void showhelp(FILE *file) {
     int nprocs = sys_nprocs();
-    int nshards = calc_nshards(nprocs);
 
     HELP("Usage: %s [options]\n", "pogocache");
     HELP("\n");
@@ -647,10 +634,9 @@ int main(int argc, char *argv[]) {
         nthreads = 4096; 
     }
 
-    if (nshards == 0) {
-        nshards = calc_nshards(nthreads);
-    }
-    if (nshards <= 0 || nshards > 65536) {
+    if (nshards <= 0) {
+        nshards = 4096;
+    } else if (nshards > 65536) {
         nshards = 65536;
     }
 
