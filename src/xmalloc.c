@@ -22,9 +22,21 @@
 #include "sys.h"
 #include "xmalloc.h"
 
+#ifndef NOMIMALLOC
+void *mi_malloc(size_t);
+void *mi_realloc(void*,size_t);
+void mi_free(void*);
+#define malloc0 mi_malloc
+#define realloc0 mi_realloc
+#define free0 mi_free
+#else
 #if defined(__linux__) && defined(__GLIBC__)
 #include <malloc.h>
 #define HAS_MALLOC_H
+#endif
+#define malloc0 malloc
+#define realloc0 realloc
+#define free0 free
 #endif
 
 // from main.c
@@ -69,7 +81,7 @@ static void check_ptr(void *ptr) {
 }
 
 void *xmalloc(size_t size) {
-    void *ptr = malloc(size);
+    void *ptr = malloc0(size);
     check_ptr(ptr);
     add_alloc();
     return ptr;
@@ -79,7 +91,7 @@ void *xrealloc(void *ptr, size_t size) {
     if (!ptr) {
         return xmalloc(size);
     }
-    ptr = realloc(ptr, size);
+    ptr = realloc0(ptr, size);
     check_ptr(ptr);
     return ptr;
 }
@@ -88,7 +100,7 @@ void xfree(void *ptr) {
     if (!ptr) {
         return;
     }
-    free(ptr);
+    free0(ptr);
     sub_alloc();
 }
 

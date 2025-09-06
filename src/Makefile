@@ -26,10 +26,22 @@ endif
 CLIBS += -lm
 
 UNAME_S := $(shell uname -s)
+
+ifndef NOGITINFOGEN
 GITHASH_S := $(shell git rev-parse --short HEAD)
 GITVERS_S := $(shell git describe --tags | sed 's/^v//' | xargs)
 _IGNORE_ := $(shell echo char GITHASH[] = \"$(GITHASH_S)\"\; > gitinfo.h)
 _IGNORE_ := $(shell echo char GITVERS[] = \"$(GITVERS_S)\"\; >> gitinfo.h)
+endif
+
+ifdef NOMIMALLOC
+CFLAGS += -DNOMIMALLOC
+else
+../deps/mimalloc/out/release/libmimalloc.a:
+	../deps/build-mimalloc.sh
+DEPS += ../deps/mimalloc/out/release/libmimalloc.a
+CLIBS += ../deps/mimalloc/out/release/libmimalloc.a
+endif
 
 ifeq ($(UNAME_S), Linux)
 ifdef NOURING
@@ -75,4 +87,6 @@ clean:
 	rm -rf *.o *.dSYM *.out *.a gitinfo.h ../pogocache
 
 distclean: 
-	rm -rf ../deps/openssl/ ../deps/liburing/ ../deps/*.tar.gz
+	rm -rf ../deps/openssl/ ../deps/liburing/ ../deps/mimalloc/ ../deps/*.tar.gz
+
+gitinfo:
