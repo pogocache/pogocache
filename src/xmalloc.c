@@ -22,21 +22,29 @@
 #include "sys.h"
 #include "xmalloc.h"
 
-#ifndef NOMIMALLOC
-void *mi_malloc(size_t);
-void *mi_realloc(void*,size_t);
-void mi_free(void*);
-#define malloc0 mi_malloc
-#define realloc0 mi_realloc
-#define free0 mi_free
-#else
 #if defined(__linux__) && defined(__GLIBC__)
 #include <malloc.h>
 #define HAS_MALLOC_H
 #endif
-#define malloc0 malloc
-#define realloc0 realloc
-#define free0 free
+
+#ifndef NOMIMALLOC
+void *mi_malloc(size_t);
+void *mi_realloc(void*,size_t);
+void mi_free(void*);
+#else
+#define mi_malloc malloc
+#define mi_realloc realloc
+#define mi_free free
+#endif
+
+#ifndef NOJEMALLOC
+void *je_malloc(size_t);
+void *je_realloc(void*,size_t);
+void je_free(void*);
+#else
+#define je_malloc malloc
+#define je_realloc realloc
+#define je_free free
 #endif
 
 // from main.c
@@ -79,6 +87,44 @@ static void check_ptr(void *ptr) {
         abort();
     }
 }
+
+static void *malloc0(size_t size) {
+    switch (useallocator) {
+    case ALLOCATOR_JEMALLOC:
+        return je_malloc(size);
+    case ALLOCATOR_MIMALLOC:
+        return mi_malloc(size);
+    default:
+        return malloc(size);
+    }
+}
+
+static void *realloc0(void *ptr, size_t size) {
+    switch (useallocator) {
+    case ALLOCATOR_JEMALLOC:
+        return je_realloc(ptr, size);
+    case ALLOCATOR_MIMALLOC:
+        return mi_realloc(ptr, size);
+    default:
+        return realloc(ptr, size);
+    }
+}
+
+
+static void free0(void *ptr) {
+    switch (useallocator) {
+    case ALLOCATOR_JEMALLOC:
+        je_free(ptr);
+        break;
+    case ALLOCATOR_MIMALLOC:
+        mi_free(ptr);
+        break;
+    default:
+        free(ptr);
+        break;
+    }
+}
+
 
 void *xmalloc(size_t size) {
     void *ptr = malloc0(size);

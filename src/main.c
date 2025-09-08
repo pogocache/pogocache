@@ -64,6 +64,7 @@ int maxconns = 1024;          // maximum number of sockets
 char *autosweep = "yes";      // perform automatic sweeps of expired entries
 char *noticker = "no";
 char *warmup = "yes";
+char *allocator = "mimalloc"; //
 
 // Global variables calculated in main().
 // These should never change during the lifetime of the process.
@@ -120,6 +121,14 @@ static void ready(void *udata) {
 
 static void showhelp(FILE *file) {
     int nprocs = sys_nprocs();
+    char allocators[256] = "";
+#ifndef NOMIMALLOC 
+    strcat(allocators, "mimalloc, ");
+#endif
+#ifndef NOJEMALLOC 
+    strcat(allocators, "jemalloc, ");
+#endif
+    strcat(allocators, "stock");
 
     HELP("Usage: %s [options]\n", "pogocache");
     HELP("\n");
@@ -162,6 +171,7 @@ static void showhelp(FILE *file) {
     HOPT("--autosweep yes/no", "automatic eviction sweeps", "%s", autosweep);
     HOPT("--keysixpack yes/no", "sixpack compress keys", "%s", keysixpack);
     HOPT("--cas yes/no", "use compare and store", "%s", usecas);
+    HOPT("--allocator name", allocators, "%s", allocator);
     HELP("\n");
 }
 
@@ -507,6 +517,7 @@ int main(int argc, char *argv[]) {
             AFLAG("noticker", noticker = flag)
             AFLAG("autosweep", autosweep = flag)
             AFLAG("warmup", warmup = flag)
+            AFLAG("allocator", allocator = flag)
 #ifndef NOOPENSSL
             // TLS flags
             AFLAG("tlsport", tlsport = flag)
@@ -587,6 +598,16 @@ int main(int argc, char *argv[]) {
         useautosweep = false;
     } else {
         INVALID_FLAG("autosweep", autosweep);
+    }
+
+    if (strcmp(allocator, "mimalloc") == 0) {
+        useallocator = ALLOCATOR_MIMALLOC;
+    } else if (strcmp(allocator, "jemalloc") == 0) {
+        useallocator = ALLOCATOR_JEMALLOC;
+    } else if (strcmp(allocator, "stock") == 0) {
+        useallocator = ALLOCATOR_STOCK;
+    } else {
+        INVALID_FLAG("allocator", allocator);
     }
 
 #ifndef __linux__
@@ -719,8 +740,8 @@ int main(int argc, char *argv[]) {
     } else {
         strcpy(buf2, "unlimited");
     }
-    printf("* Memory (system: %s, max: %s, evict: %s)\n", memstr(sysmem, buf0),
-        buf2, evict);
+    printf("* Memory (system: %s, max: %s, evict: %s, allocator: %s)\n", 
+        memstr(sysmem, buf0), buf2, evict, allocator);
     printf("* Features (verbosity: %s, sixpack: %s, cas: %s, persist: %s, "
         "uring: %s)\n",
         verb==0?"normal":verb==1?"verbose":verb==2?"very":"extremely",

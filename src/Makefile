@@ -43,6 +43,16 @@ DEPS += ../deps/mimalloc/out/release/libmimalloc.a
 CLIBS += ../deps/mimalloc/out/release/libmimalloc.a
 endif
 
+ifdef NOJEMALLOC
+CFLAGS += -DNOJEMALLOC
+else
+../deps/jemalloc/lib/libjemalloc.a:
+	../deps/build-jemalloc.sh
+DEPS += ../deps/jemalloc/lib/libjemalloc.a
+CLIBS += ../deps/jemalloc/lib/libjemalloc.a
+endif
+
+
 ifeq ($(UNAME_S), Linux)
 ifdef NOURING
 CFLAGS += -DNOURING
