@@ -35,7 +35,7 @@ fi
 if [[ $buildok == "0" ]]; then
     make -C ../.. clean
 fi
-CCSANI=1 make -C ../..
+CCSANI=1 NOOPENSSL=1 NOJEMALLOC=1 NOMIMALLOC=1 make -C ../..
 
 # Run Pogocache
 ../../pogocache --shards=128 --cas=yes &

@@ -97,6 +97,7 @@ clean:
 	rm -rf *.o *.dSYM *.out *.a gitinfo.h ../pogocache
 
 distclean: 
-	rm -rf ../deps/openssl/ ../deps/liburing/ ../deps/mimalloc/ ../deps/*.tar.gz
+	rm -rf ../deps/openssl/ ../deps/liburing/ ../deps/mimalloc/ 
+	rm -rf ../deps/jemalloc/ ../deps/*.tar.gz
 
 gitinfo:
