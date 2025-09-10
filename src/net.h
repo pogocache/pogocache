@@ -22,8 +22,6 @@ void *net_conn_udata(struct net_conn *conn);
 bool net_conn_isclosed(struct net_conn *conn);
 void net_conn_close(struct net_conn *conn);
 
-int net_conn_fd(struct net_conn *conn);
-
 // Get the raw output.
 char *net_conn_out(struct net_conn *conn);
 size_t net_conn_out_len(struct net_conn *conn);

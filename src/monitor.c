@@ -73,9 +73,9 @@ void monitor_cmd(int64_t now, int db, const char *addr, struct args *args) {
                 break;
             default:
                 if (ch < 32 || ch >= 127) {
-                    char hex[4];
-                    snprintf(hex, 4, "\\x%02X", ch);
-                    buf_append(&buf, hex, 4);
+                    char hex[8];
+                    snprintf(hex, 8, "\\x%02X", ch);
+                    buf_append(&buf, hex, 8);
                 } else {
                     buf_append_byte(&buf, ch);
                 }

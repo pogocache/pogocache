@@ -443,10 +443,6 @@ struct pg *conn_pg(struct conn *conn) {
     return conn->pg;
 }
 
-int conn_fd(struct conn *conn) {
-    return net_conn_fd(conn->conn5);
-}
-
 int conn_setnonblock(struct conn *conn, bool set) {
     return net_conn_setnonblock(conn->conn5, set);
 }
