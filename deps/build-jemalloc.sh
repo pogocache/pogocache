@@ -14,7 +14,8 @@ fi
 cd jemalloc
 
 if [ ! -f "build.ready" ]; then
-    ./autogen.sh
+    ./autogen.sh --with-jemalloc-prefix=je_ \
+        --with-malloc-conf="dirty_decay_ms:500,muzzy_decay_ms:500"
     make -j10
     touch build.ready
 fi
