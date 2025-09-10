@@ -55,12 +55,17 @@
 
 extern const int verb;
 
-static int setnonblock(int fd) {
+int setnonblock(int fd, bool set) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
         return -1;
     }
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (set) {
+        flags |= O_NONBLOCK;
+    } else {;
+        flags &= ~O_NONBLOCK;
+    }
+    return fcntl(fd, F_SETFL, flags);
 }
 
 static int settcpnodelay(int fd, bool nodelay) {
@@ -579,7 +584,7 @@ static void qaccept(struct qthreadctx *ctx) {
                 if (fd == -1) {
                     continue;
                 }
-                if (setnonblock(fd) == -1) {
+                if (setnonblock(fd, true) == -1) {
                     close(fd);
                     continue;
                 }
@@ -975,7 +980,7 @@ static int listen_tcp(const char *host, const char *port, bool reuseport,
         abort();
     }
 #endif
-    ret = setnonblock(fd);
+    ret = setnonblock(fd, true);
     if (ret == -1) {
         perror("# setnonblock");
         abort();
@@ -1007,7 +1012,7 @@ static int listen_unixsock(const char *unixsock, int backlog) {
     memset(&unaddr, 0, sizeof(struct sockaddr_un));
     unaddr.sun_family = AF_UNIX;
     strncpy(unaddr.sun_path, unixsock, sizeof(unaddr.sun_path) - 1);
-    int ret = setnonblock(fd);
+    int ret = setnonblock(fd, true);
     if (ret == -1) {
         perror("# setnonblock");
         abort();
@@ -1263,8 +1268,14 @@ bool net_conn_bgwork(struct net_conn *conn, void (*work)(void *udata),
     if (conn->bgctx || conn->closed) {
         return false;
     }
+    if (!conn->closed) {
+        flush_conn(conn, 0);
+    }
+    if (conn->closed) {
+        return false;
+    }
     struct qthreadctx *ctx = conn->ctx;
-    int ret = delread(ctx->qfd, conn->fd);
+    int ret = delread(ctx->qfd, conn->fd);    
     assert(ret == 0); (void)ret;
     conn->bgctx = xmalloc(sizeof(struct bgworkctx));
     memset(conn->bgctx, 0, sizeof(struct bgworkctx));
@@ -1308,4 +1319,44 @@ void net_stat_get_misses_incr(struct net_conn *conn) {
 
 bool net_conn_istls(struct net_conn *conn) {
     return conn->tls != 0;
+}
+
+int net_conn_setnonblock(struct net_conn *conn, bool set) {
+    return setnonblock(conn->fd, set);
+}
+
+// only use when full detached
+ssize_t net_conn_read(struct net_conn *conn, char *bytes, size_t nbytes) {
+    return tls_read(conn->tls, conn->fd, bytes, nbytes);
+}
+
+ssize_t net_conn_write(struct net_conn *conn, const char *bytes, size_t nbytes){
+    return tls_write(conn->tls, conn->fd, bytes, nbytes);
+}
+
+
+const char *net_conn_addr(struct net_conn *conn) {
+    static __thread char addrstr[512];
+    struct sockaddr_storage addr;
+    socklen_t addr_len = sizeof(addr);
+    if (getpeername(conn->fd, (struct sockaddr *)&addr, &addr_len) == -1) {
+        return "";
+    }
+    static char ipstr[INET6_ADDRSTRLEN];
+    int port;
+    if (addr.ss_family == AF_INET) {
+        struct sockaddr_in *s = (struct sockaddr_in *)&addr;
+        inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof(ipstr));
+        port = ntohs(s->sin_port);
+    } else if (addr.ss_family == AF_INET6) {
+        struct sockaddr_in6 *s = (struct sockaddr_in6 *)&addr;
+        inet_ntop(AF_INET6, &s->sin6_addr, ipstr, sizeof(ipstr));
+        port = ntohs(s->sin6_port);
+    } else if (addr.ss_family == AF_UNIX) {
+        return "unixsocket";
+    } else {
+        return "";
+    }
+    snprintf(addrstr, sizeof(addrstr), "%s:%d", ipstr, port);
+    return addrstr;
 }

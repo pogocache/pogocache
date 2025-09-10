@@ -22,6 +22,8 @@ void *net_conn_udata(struct net_conn *conn);
 bool net_conn_isclosed(struct net_conn *conn);
 void net_conn_close(struct net_conn *conn);
 
+int net_conn_fd(struct net_conn *conn);
+
 // Get the raw output.
 char *net_conn_out(struct net_conn *conn);
 size_t net_conn_out_len(struct net_conn *conn);
@@ -85,5 +87,11 @@ uint64_t stat_cmd_get(void);
 uint64_t stat_cmd_set(void);
 uint64_t stat_get_hits(void);
 uint64_t stat_get_misses(void);
+
+// only use these from bgwork threads
+int net_conn_setnonblock(struct net_conn *conn, bool set);
+ssize_t net_conn_read(struct net_conn *conn, char *bytes, size_t nbytes);
+ssize_t net_conn_write(struct net_conn *conn, const char *bytes, size_t nbytes);
+const char *net_conn_addr(struct net_conn *conn);
 
 #endif

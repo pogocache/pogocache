@@ -88,7 +88,7 @@ all: ../pogocache
 OBJS += sys.o cmds.o util.o buf.o stats.o conn.o args.o uring.o
 OBJS += memcache.o postgres.o tls.o save.o parse.o lz4.o
 OBJS += net.o xmalloc.o main.o pogocache.o resp.o http.o 
-OBJS += hashmap.o
+OBJS += hashmap.o monitor.o
 
 ../pogocache: $(DEPS) $(OBJS)
 	$(CC) $(CFLAGS) -o ../pogocache$(OUTEXT) $(LDFLAGS) $(OBJS) $(CLIBS)

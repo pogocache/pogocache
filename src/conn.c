@@ -31,6 +31,7 @@ struct conn {
     bool noreply;           // only for memcache
     bool keepalive;         // only for http
     int httpvers;           // only for http
+    char *addr;             // remote address.
     struct args args;       // command args, if any
     struct pg *pg;          // postgres context, only if proto is postgres
 };
@@ -73,6 +74,7 @@ void evclosed(struct net_conn *conn5, void *udata) {
     buf_clear(&conn->packet);
     args_free(&conn->args);
     pg_free(conn->pg);
+    xfree(conn->addr);
     xfree(conn);
 }
 
@@ -439,4 +441,31 @@ bool pg_execute(struct conn *conn) {
 
 struct pg *conn_pg(struct conn *conn) {
     return conn->pg;
+}
+
+int conn_fd(struct conn *conn) {
+    return net_conn_fd(conn->conn5);
+}
+
+int conn_setnonblock(struct conn *conn, bool set) {
+    return net_conn_setnonblock(conn->conn5, set);
+}
+
+ssize_t conn_read(struct conn *conn, char *bytes, size_t nbytes) {
+    return net_conn_read(conn->conn5, bytes, nbytes);
+}
+
+ssize_t conn_write(struct conn *conn, const char *bytes, size_t nbytes) {
+    return net_conn_write(conn->conn5, bytes, nbytes);
+}
+
+const char *conn_addr(struct conn *conn) {
+    if (conn->addr) {
+        return conn->addr;
+    }
+    const char *addr = net_conn_addr(conn->conn5);
+    size_t n = strlen(addr);
+    conn->addr = xmalloc(n);
+    memcpy(conn->addr, addr, n);
+    return conn->addr;
 }
