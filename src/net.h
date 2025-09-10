@@ -86,4 +86,10 @@ uint64_t stat_cmd_set(void);
 uint64_t stat_get_hits(void);
 uint64_t stat_get_misses(void);
 
+// only use these from bgwork threads
+int net_conn_setnonblock(struct net_conn *conn, bool set);
+ssize_t net_conn_read(struct net_conn *conn, char *bytes, size_t nbytes);
+ssize_t net_conn_write(struct net_conn *conn, const char *bytes, size_t nbytes);
+const char *net_conn_addr(struct net_conn *conn);
+
 #endif

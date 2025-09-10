@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 # ./run.sh [<test-name>]
 
 set -e
@@ -28,18 +27,18 @@ pkill -9 pogocache || true
 
 # Build pogocache with sanitizers
 buildok=0
-if [[ -f ../pogocache ]]; then
-    if [[ "$(../pogocache --version)" == *CCSANI* ]]; then
+if [[ -f ../../pogocache ]]; then
+    if [[ "$(../../pogocache --version)" == *CCSANI* ]]; then
         buildok=1
     fi
 fi
 if [[ $buildok == "0" ]]; then
-    make -C .. clean
+    make -C ../.. clean
 fi
-CCSANI=1 make -C ..
+CCSANI=1 NOOPENSSL=1 NOJEMALLOC=1 NOMIMALLOC=1 make -C ../..
 
 # Run Pogocache
-../pogocache --shards=128 --cas=yes &
+../../pogocache --shards=128 --cas=yes &
 sleep 0.1
 
 

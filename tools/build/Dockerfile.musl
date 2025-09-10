@@ -1,0 +1,7 @@
+FROM alpine:3.22
+RUN apk update
+RUN apk add --no-cache build-base linux-headers perl git pkgconf tar cmake
+COPY . /pogocache
+RUN cd /pogocache && tar -xzf repo.tar.gz
+RUN cd /pogocache/src && NOGITINFOGEN=1 make all
+RUN ls /pogocache

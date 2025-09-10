@@ -31,6 +31,14 @@ void conn_close(struct conn *conn);
 bool conn_isclosed(struct conn *conn);
 bool conn_istls(struct conn *conn);
 
+// only use these from bgwork threads
+ssize_t conn_read(struct conn *conn, char *bytes, size_t nbytes);
+ssize_t conn_write(struct conn *conn, const char *bytes, size_t nbytes);
+int conn_fd(struct conn *conn);
+int conn_setnonblock(struct conn *conn, bool set);
+
+const char *conn_addr(struct conn *conn);
+
 void conn_write_error(struct conn *conn, const char *err);
 void conn_write_raw(struct conn *conn, const void *data, size_t len);
 void conn_write_string(struct conn *conn, const char *cstr);

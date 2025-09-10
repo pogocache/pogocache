@@ -31,6 +31,8 @@
 #include "xmalloc.h"
 #include "pogocache.h"
 #include "stats.h"
+#include "monitor.h"
+#include "tls.h"
 
 // from main.c
 extern const uint64_t seed;
@@ -49,6 +51,7 @@ extern const int nshards;
 extern const int narenas;
 extern const int64_t procstart;
 extern const int maxconns;
+extern atomic_bool monitoring;
 
 extern struct pogocache *cache;
 
@@ -1348,6 +1351,75 @@ static void cmdECHO(struct conn *conn, struct args *args) {
     }
 }
 
+ssize_t parse_resp(const char *bytes, size_t len, struct args *args);
+ssize_t parse_resp_telnet(const char *bytes, size_t len, struct args *args);
+
+struct monitor_ctx {
+    struct conn *conn;
+};
+
+static void monitor_work(void *udata) {
+    struct monitor_ctx *ctx = udata;
+    struct conn *conn = ctx->conn;
+    char pkt[4096];
+    conn_setnonblock(conn, false);
+    monitor_start(conn);
+    struct args args = { 0 };
+    while (1) {
+        ssize_t n = conn_read(conn, pkt, sizeof(pkt));
+        if (n <= 0) {
+            break;
+        }
+        args_clear(&args);
+        ssize_t nn;
+        if (pkt[0] == '*') {
+            nn = parse_resp(pkt, n, &args);
+        } else {
+            nn = parse_resp_telnet(pkt, n, &args);
+        }
+        if (nn != n) {
+            break;
+        }
+        if (args.len == 0) {
+            continue;
+        } else if (args_eq(&args, 0, "ping")) {
+            conn_write(conn, "+PONG\r\n", 7);
+        } else {
+            break;
+        }
+    }
+    args_free(&args);
+    monitor_stop(conn);
+    conn_setnonblock(conn, false);
+}
+
+static void monitor_done(struct conn *conn, void *udata) {
+    struct dbg_detach_ctx *ctx = udata;
+    xfree(ctx);
+    conn_close(conn);
+}
+
+
+static void cmdMONITOR(struct conn *conn, struct args *args) {
+    if (conn_proto(conn) != PROTO_RESP) {
+        conn_write_error(conn, "unavailable");
+        return;
+    }
+    if (args->len != 1) {
+        conn_write_error(conn, ERR_WRONG_NUM_ARGS);
+        return;
+    }
+    conn_write_string(conn, "OK");
+    struct monitor_ctx *ctx = xmalloc(sizeof(struct monitor_ctx));
+    memset(ctx, 0, sizeof(struct monitor_ctx));
+    ctx->conn = conn;
+    if (!conn_bgwork(conn, monitor_work, monitor_done, ctx)) {
+        conn_write_error(conn, "ERR failed to do work");
+        xfree(ctx);
+    }
+
+}
+
 static void cmdPING(struct conn *conn, struct args *args) {
     if (args->len > 2) {
         conn_write_error(conn, ERR_WRONG_NUM_ARGS);
@@ -1915,6 +1987,7 @@ static struct cmd cmds[] = {
     { "flushdb",   cmdFLUSHALL }, // pg
     { "flushall",  cmdFLUSHALL }, // pg
     { "flush",     cmdFLUSHALL }, // pg
+    { "monitor",   cmdMONITOR  }, // pg not available
     { "purge",     cmdPURGE    }, // pg
     { "sweep",     cmdSWEEP    }, // pg
     { "keys",      cmdKEYS     }, // pg
@@ -2001,8 +2074,10 @@ void evcommand(struct conn *conn, struct args *args) {
             args_print(args);
         }
     }
+    
     struct cmd *cmd = get_cmd(args->bufs[0].data, args->bufs[0].len);
     if (cmd) {
+        monitor_cmd(sys_unixnow(), 0, conn_addr(conn), args);
         cmd->func(conn, args);
     } else {
         char *errmsg = xmalloc(256);

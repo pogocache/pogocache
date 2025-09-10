@@ -1,3 +1,5 @@
 openssl/
 liburing/
+mimalloc/
+jemalloc/
 *.tar.gz

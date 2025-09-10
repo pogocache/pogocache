@@ -26,10 +26,32 @@ endif
 CLIBS += -lm
 
 UNAME_S := $(shell uname -s)
+
+ifndef NOGITINFOGEN
 GITHASH_S := $(shell git rev-parse --short HEAD)
 GITVERS_S := $(shell git describe --tags | sed 's/^v//' | xargs)
 _IGNORE_ := $(shell echo char GITHASH[] = \"$(GITHASH_S)\"\; > gitinfo.h)
 _IGNORE_ := $(shell echo char GITVERS[] = \"$(GITVERS_S)\"\; >> gitinfo.h)
+endif
+
+ifdef NOMIMALLOC
+CFLAGS += -DNOMIMALLOC
+else
+../deps/mimalloc/out/release/libmimalloc.a:
+	../deps/build-mimalloc.sh
+DEPS += ../deps/mimalloc/out/release/libmimalloc.a
+CLIBS += ../deps/mimalloc/out/release/libmimalloc.a
+endif
+
+ifdef NOJEMALLOC
+CFLAGS += -DNOJEMALLOC
+else
+../deps/jemalloc/lib/libjemalloc.a:
+	../deps/build-jemalloc.sh
+DEPS += ../deps/jemalloc/lib/libjemalloc.a
+CLIBS += ../deps/jemalloc/lib/libjemalloc.a
+endif
+
 
 ifeq ($(UNAME_S), Linux)
 ifdef NOURING
@@ -66,7 +88,7 @@ all: ../pogocache
 OBJS += sys.o cmds.o util.o buf.o stats.o conn.o args.o uring.o
 OBJS += memcache.o postgres.o tls.o save.o parse.o lz4.o
 OBJS += net.o xmalloc.o main.o pogocache.o resp.o http.o 
-OBJS += hashmap.o
+OBJS += hashmap.o monitor.o
 
 ../pogocache: $(DEPS) $(OBJS)
 	$(CC) $(CFLAGS) -o ../pogocache$(OUTEXT) $(LDFLAGS) $(OBJS) $(CLIBS)
@@ -75,4 +97,7 @@ clean:
 	rm -rf *.o *.dSYM *.out *.a gitinfo.h ../pogocache
 
 distclean: 
-	rm -rf ../deps/openssl/ ../deps/liburing/ ../deps/*.tar.gz
+	rm -rf ../deps/openssl/ ../deps/liburing/ ../deps/mimalloc/ 
+	rm -rf ../deps/jemalloc/ ../deps/*.tar.gz
+
+gitinfo:

@@ -1,7 +1,10 @@
 default: all
 
 test:
-	tests/run.sh
+	tools/tests/run.sh
+
+package:
+	tools/package.sh
 
 .DEFAULT:
 	cd src && $(MAKE) $@

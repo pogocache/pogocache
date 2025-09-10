@@ -29,6 +29,6 @@ if [ ! -f "config.ready" ]; then
 fi
 
 if [ ! -f "build.ready" ]; then
-    make -j32
+    make -j10
     touch build.ready
 fi

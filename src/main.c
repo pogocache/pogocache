@@ -46,6 +46,7 @@ char *tcpnodelay = "yes";     // disable nagle's algorithm
 char *quickack = "no";        // enable quick acks
 char *usecas = "no";          // enable compare and store
 char *keepalive = "yes";      // socket keepalive setting
+int nshards = 4096;           // number of shards
 int backlog = 1024;           // network socket accept backlog
 int queuesize = 128;          // event queue size
 char *maxmemory = "80%";      // Maximum memory allowed - 80% total system
@@ -63,6 +64,7 @@ int maxconns = 1024;          // maximum number of sockets
 char *autosweep = "yes";      // perform automatic sweeps of expired entries
 char *noticker = "no";
 char *warmup = "yes";
+char *allocator = "mimalloc"; //
 
 // Global variables calculated in main().
 // These should never change during the lifetime of the process.
@@ -78,7 +80,6 @@ bool usesixpack;
 int useallocator;
 bool usetrackallocs;
 bool useevict;
-int nshards;
 bool usetls;        // use tls security (pemfile required);
 bool useauth;       // use auth password
 bool usecolor;      // allow color in terminal
@@ -118,21 +119,16 @@ static void ready(void *udata) {
     } \
     fprintf(file, "\n");
 
-static int calc_nshards(int nprocs) {
-    switch (nprocs) {
-    case 1:  return 64;
-    case 2:  return 128;
-    case 3:  return 256;
-    case 4:  return 512;
-    case 5:  return 1024;
-    case 6:  return 2048;
-    default: return 4096;
-    }
-}
-
 static void showhelp(FILE *file) {
     int nprocs = sys_nprocs();
-    int nshards = calc_nshards(nprocs);
+    char allocators[256] = "";
+#ifndef NOMIMALLOC 
+    strcat(allocators, "mimalloc, ");
+#endif
+#ifndef NOJEMALLOC 
+    strcat(allocators, "jemalloc, ");
+#endif
+    strcat(allocators, "stock");
 
     HELP("Usage: %s [options]\n", "pogocache");
     HELP("\n");
@@ -175,6 +171,7 @@ static void showhelp(FILE *file) {
     HOPT("--autosweep yes/no", "automatic eviction sweeps", "%s", autosweep);
     HOPT("--keysixpack yes/no", "sixpack compress keys", "%s", keysixpack);
     HOPT("--cas yes/no", "use compare and store", "%s", usecas);
+    HOPT("--allocator name", allocators, "%s", allocator);
     HELP("\n");
 }
 
@@ -520,6 +517,7 @@ int main(int argc, char *argv[]) {
             AFLAG("noticker", noticker = flag)
             AFLAG("autosweep", autosweep = flag)
             AFLAG("warmup", warmup = flag)
+            AFLAG("allocator", allocator = flag)
 #ifndef NOOPENSSL
             // TLS flags
             AFLAG("tlsport", tlsport = flag)
@@ -602,6 +600,16 @@ int main(int argc, char *argv[]) {
         INVALID_FLAG("autosweep", autosweep);
     }
 
+    if (strcmp(allocator, "mimalloc") == 0) {
+        useallocator = ALLOCATOR_MIMALLOC;
+    } else if (strcmp(allocator, "jemalloc") == 0) {
+        useallocator = ALLOCATOR_JEMALLOC;
+    } else if (strcmp(allocator, "stock") == 0) {
+        useallocator = ALLOCATOR_STOCK;
+    } else {
+        INVALID_FLAG("allocator", allocator);
+    }
+
 #ifndef __linux__
     bool useuring = false;
 #else
@@ -647,10 +655,9 @@ int main(int argc, char *argv[]) {
         nthreads = 4096; 
     }
 
-    if (nshards == 0) {
-        nshards = calc_nshards(nthreads);
-    }
-    if (nshards <= 0 || nshards > 65536) {
+    if (nshards <= 0) {
+        nshards = 4096;
+    } else if (nshards > 65536) {
         nshards = 65536;
     }
 
@@ -733,8 +740,8 @@ int main(int argc, char *argv[]) {
     } else {
         strcpy(buf2, "unlimited");
     }
-    printf("* Memory (system: %s, max: %s, evict: %s)\n", memstr(sysmem, buf0),
-        buf2, evict);
+    printf("* Memory (system: %s, max: %s, evict: %s, allocator: %s)\n", 
+        memstr(sysmem, buf0), buf2, evict, allocator);
     printf("* Features (verbosity: %s, sixpack: %s, cas: %s, persist: %s, "
         "uring: %s)\n",
         verb==0?"normal":verb==1?"verbose":verb==2?"very":"extremely",
