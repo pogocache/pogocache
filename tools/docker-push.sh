@@ -96,22 +96,33 @@ docker push pogocache/pogocache:aarch64
 docker push pogocache/pogocache:amd64
 
 # Create a combined manifest
-docker manifest create pogocache/pogocache:edge \
-  --amend pogocache/pogocache:aarch64 \
-  --amend pogocache/pogocache:amd64
-docker manifest annotate pogocache/pogocache:edge \
-    pogocache/pogocache:aarch64 --os linux --arch arm64
-docker manifest annotate pogocache/pogocache:edge \
-    pogocache/pogocache:amd64 --os linux --arch amd64
+create_manifest() {
+  docker manifest create pogocache/pogocache:$1 \
+    --amend pogocache/pogocache:aarch64 \
+    --amend pogocache/pogocache:amd64
+  docker manifest annotate pogocache/pogocache:$1 \
+      pogocache/pogocache:aarch64 --os linux --arch arm64
+  docker manifest annotate pogocache/pogocache:$1 \
+      pogocache/pogocache:amd64 --os linux --arch amd64
+}
 
-# Push the manifest
-echo "Pushing edge"
-docker manifest push pogocache/pogocache:edge
+push_manifest() {
+  docker manifest push pogocache/pogocache:$1
+}
+
+# Create manifests
+create_manifest edge
 if [ "$oexists" == 0 ]; then
-  # Version does not exists, also push those
-  echo "Pushing latest and $GIT_VERSION"
-  docker manifest push pogocache/pogocache:latest
-  docker manifest push pogocache/pogocache:$GIT_VERSION
+  create_manifest latest
+  create_manifest $GIT_VERSION
+fi
+
+# Push manifests
+push_manifest edge
+if [ "$oexists" == 0 ]; then
+  # Version does exists, also push those
+  push_manifest latest
+  push_manifest $GIT_VERSION
 else
   echo "Could not push latest and $GIT_VERSION, already exist"
 fi
