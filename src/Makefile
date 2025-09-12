@@ -23,7 +23,7 @@ CFLAGS := -Wall -Wextra -Werror -g -O3 -flto=auto $(CFLAGS)
 endif
 endif
 
-CLIBS += -lm
+CLIBS += -lm -lpthread
 
 UNAME_S := $(shell uname -s)
 
