@@ -88,7 +88,6 @@ int64_t procstart;  // proc start boot time, for uptime stat
 
 // Global atomic variable. These are safe to read and modify by other source
 // files, as long as those sources use "atomic_" methods.
-atomic_int shutdownreq;          // shutdown request counter
 atomic_int_fast64_t flush_delay; // delay in seconds to next async flushall
 atomic_bool sweep;               // mark for async sweep, asap
 atomic_bool registered;          // registration is active
@@ -297,29 +296,43 @@ static void evicted(int shard, int reason, int64_t time, const void *key,
 
 static atomic_bool loaded = false;
 
+static atomic_int sigexit = 0;
+
+static void sigprint(const char *msg) {
+    write(STDERR_FILENO, msg, strlen(msg));
+}
+
 void sigterm(int sig) {
     if (sig == SIGINT || sig == SIGTERM) {
-        if (!atomic_load(&loaded) || !*persist) {
-            printf("# Pogocache exiting now\n");
-            exit(0);
+        if (atomic_load_explicit(&sigexit, memory_order_relaxed)) {
+            sigprint("# User forced shutdown\n");
+            sigprint("# Pogocache exiting now\n");
+            _exit(0);
         }
-        if (*persist) {
-            printf("* Saving data to %s, please wait...\n", persist);
-            int ret = save(persist, true);
-            if (ret != 0) {
-                perror("# Save failed");
-                exit(1);
-            }
-            printf("# Pogocache exiting now\n");
-            exit(0);
-        }
-        int count = atomic_fetch_add(&shutdownreq, 1);
-        if (count > 0 && sig == SIGINT) {
-            printf("# User forced shutdown\n");
-            printf("# Pogocache exiting now\n");
-            exit(0);
-        }
+        atomic_store(&sigexit, 1);
     }
+}
+
+static void *sigtermchecker(void *arg) {
+    (void)arg;
+    while (atomic_load_explicit(&sigexit, memory_order_relaxed) == 0) {
+        usleep(100000);
+    }
+    if (!atomic_load(&loaded) || !*persist) {
+        printf("# Pogocache exiting now\n");
+        exit(0);
+    }
+    if (*persist) {
+        printf("* Saving data to %s, please wait...\n", persist);
+        int ret = save(persist, true);
+        if (ret != 0) {
+            perror("# Save failed");
+            exit(1);
+        }
+        printf("# Pogocache exiting now\n");
+        exit(0);
+    }
+    return 0;
 }
 
 static void tick(void) {
@@ -442,6 +455,7 @@ int main(int argc, char *argv[]) {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, sigterm);
     signal(SIGTERM, sigterm);
+    assert(atomic_is_lock_free(&sigexit));
 
     // Line buffer logging so pipes will stream.
     setvbuf(stdout, 0, _IOLBF, 0);
@@ -470,7 +484,6 @@ int main(int argc, char *argv[]) {
         uring = "no";
     }
 
-    atomic_init(&shutdownreq, 0);
     atomic_init(&flush_delay, 0);
     atomic_init(&sweep, false);
     atomic_init(&registered, false);
@@ -768,6 +781,14 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
     }
+
+    pthread_t th;
+    int ret = pthread_create(&th, 0, sigtermchecker, 0);
+    if (ret == -1) {
+        perror("# pthread_create(sigtermchecker)");
+        exit(1);
+    }
+
 #ifdef DATASETOK
     printf("# DATASETOK\n");
 #endif
