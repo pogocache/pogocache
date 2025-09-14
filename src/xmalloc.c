@@ -31,6 +31,7 @@
 void *mi_malloc(size_t);
 void *mi_realloc(void*,size_t);
 void mi_free(void*);
+void mi_collect(bool);
 #else
 #define mi_malloc malloc
 #define mi_realloc realloc
@@ -151,8 +152,19 @@ void xfree(void *ptr) {
 }
 
 void xpurge(void) {
-#ifdef HAS_MALLOC_H
     // Releases unused heap memory to OS
-    malloc_trim(0);
+    switch (useallocator) {
+    case ALLOCATOR_JEMALLOC:
+        break;
+    case ALLOCATOR_MIMALLOC:
+#ifndef NOMIMALLOC
+        mi_collect(true);
 #endif
+        break;
+    default:
+#ifdef HAS_MALLOC_H
+        malloc_trim(0);
+#endif
+        break;
+    }
 }
