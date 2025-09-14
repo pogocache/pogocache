@@ -299,7 +299,8 @@ static atomic_bool loaded = false;
 static atomic_int sigexit = 0;
 
 static void sigprint(const char *msg) {
-    write(STDERR_FILENO, msg, strlen(msg));
+    ssize_t n = write(STDERR_FILENO, msg, strlen(msg));
+    (void)n;
 }
 
 void sigterm(int sig) {
