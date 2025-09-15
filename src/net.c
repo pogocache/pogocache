@@ -70,7 +70,7 @@ int setnonblock(int fd, bool set) {
 
 static int settcpnodelay(int fd, bool nodelay) {
     int val = nodelay;
-    return setsockopt(fd, SOL_SOCKET, TCP_NODELAY, &val, sizeof(val));
+    return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
 }
 
 static int setquickack(int fd, bool quickack) {
