@@ -70,13 +70,13 @@ int setnonblock(int fd, bool set) {
 
 static int settcpnodelay(int fd, bool nodelay) {
     int val = nodelay;
-    return setsockopt(fd, SOL_SOCKET, TCP_NODELAY, &val, sizeof(val)) == 0;
+    return setsockopt(fd, SOL_SOCKET, TCP_NODELAY, &val, sizeof(val));
 }
 
 static int setquickack(int fd, bool quickack) {
 #if defined(__linux__)
     int val = quickack;
-    return setsockopt(fd, SOL_SOCKET, TCP_QUICKACK, &val, sizeof(val)) == 0;
+    return setsockopt(fd, SOL_SOCKET, TCP_QUICKACK, &val, sizeof(val));
 #else
     (void)fd, (void)quickack;
     return 0;
