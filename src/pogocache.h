@@ -189,10 +189,10 @@ int pogocache_load(struct pogocache *cache, const void *key, size_t keylen,
 int pogocache_iter(struct pogocache *cache, struct pogocache_iter_opts *opts);
 void pogocache_sweep(struct pogocache *cache, size_t *swept, size_t *kept, 
     struct pogocache_sweep_opts *opts);
-void pogocache_clear(struct pogocache *cache,
-    struct pogocache_clear_opts *opts);
 double pogocache_sweep_poll(struct pogocache *cache,
     struct pogocache_sweep_poll_opts *opts);
+void pogocache_clear(struct pogocache *cache,
+    struct pogocache_clear_opts *opts);
 
 // stat operations
 size_t pogocache_count(struct pogocache *cache,

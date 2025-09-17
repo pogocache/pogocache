@@ -374,34 +374,17 @@ static void tick(void) {
     }
 
     if (useautosweep) {
-        // Auto sweep shards to remove expired entries.
-        // Choose a random shard. Sweep it. If more than 10% where of the
-        // entries in the shard were expired then immediately sweep all the
-        // shards.
-        const double HIGH_SWEEP = 0.10;
-        int nshards =  pogocache_nshards(cache);
-        uint64_t seed = sys_seed(); // sys_seed is cryptorandom
-        for (int i = 0; i < nshards; i++) {
-            int sidx = (seed+i)%nshards;
-            struct pogocache_sweep_opts opts = {
-                .oneshard = 1,
-                .oneshardidx = sidx,
-                .time = sys_now(),
-            };
-            size_t swept, kept;
-            pogocache_sweep(cache, &swept, &kept, &opts);
-            double perc = 0.0;
-            if (swept > 0) {
-                perc = (double)swept/(double)(swept+kept);
-            }
-            if (verb >= 2) {
-                double elapsed = (double)(sys_now()-opts.time)/(double)SECOND;
-                printf(". Swept shard %d in %0.f secs (swept=%zu, kept=%zu, "
-                    "%.1f%%)\n", sidx, elapsed, swept, kept, perc); 
-            }
-            if (i == 0 && perc < HIGH_SWEEP) {
-                break;
-            }
+        // Auto sweep shards to remove expired entries. Choose a random shard.
+        // If more than 10% of the shards entries are expired then immediately
+        // sweep all the shards.
+        int64_t time = sys_now();
+        struct pogocache_sweep_poll_opts opts = { 
+            .time = time, 
+            .pollsize = 20,
+        };
+        if (pogocache_sweep_poll(cache, &opts) > 0.10) {
+            struct pogocache_sweep_opts opts = { .time = time };
+            pogocache_sweep(cache, 0, 0, &opts);
         }
     }
 }
