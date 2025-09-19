@@ -354,18 +354,13 @@ static void entry_settime(struct entry *entry, int64_t time) {
     entry->time = time;
 }
 
-static int entry_alive_exp(int64_t expires, int64_t etime, int64_t now,
-    int64_t cleartime)
-{
-    return etime < cleartime ? POGOCACHE_REASON_CLEARED :
-        expires > 0 && expires <= now ? POGOCACHE_REASON_EXPIRED :
-        0;
+static int entry_alive_exp(int64_t expires, int64_t now) {
+    return expires > 0 && expires <= now ? POGOCACHE_REASON_EXPIRED : 0;
 }
 
-static int entry_alive(struct entry *entry, int64_t now, int64_t cleartime) {
-    int64_t etime = entry_time(entry);
+static int entry_alive(struct entry *entry, int64_t now) {
     int64_t expires = entry_expires(entry);
-    return entry_alive_exp(expires, etime, now, cleartime);
+    return entry_alive_exp(expires, now);
 }
 
 static uint64_t entry_cas(const struct entry *entry, struct pgctx *ctx) {
@@ -679,8 +674,6 @@ struct map {
 struct shard {
     atomic_uintptr_t lock; // spinlock (batch pointer)
     uint64_t cas;          // compare and store value
-    int64_t cleartime;     // last clear time
-    int clearcount;        // number of items cleared
     struct map map;        // robinhood hashmap
     // for batch linked list only
     struct shard *next;
@@ -796,9 +789,9 @@ static void set_dib(struct bucket *bucket, uint8_t dib) {
 }
 
 static bool map_init(struct map *map, size_t cap, struct pgctx *ctx) {
+    memset(map, 0, sizeof(struct map));
     map->cap = cap;
     map->nbuckets = cap;
-    map->count = 0;
     map->mask = map->nbuckets-1;
     map->growat = map->nbuckets * ctx->loadfactor;
     map->shrinkat = map->nbuckets * ctx->shrinkfactor;
@@ -813,37 +806,45 @@ static bool map_init(struct map *map, size_t cap, struct pgctx *ctx) {
     return true;
 }
 
-static bool resize(struct map *map, size_t new_cap, struct pgctx *ctx) {
+static bool resize(struct map *map, size_t new_cap, struct pgctx *ctx, 
+    bool forclear)
+{
     struct map map2;
     if (!map_init(&map2, new_cap, ctx)) {
         return false;
     }
-    for (int i = 0; i < map->nbuckets; i++) {
-        struct bucket ebkt = map->buckets[i];
-        if (get_dib(&ebkt)) {
-            set_dib(&ebkt, 1);
-            size_t j = get_hash(&ebkt) & map2.mask;
-            while (1) {
-                if (get_dib(&map2.buckets[j]) == 0) {
-                    map2.buckets[j] = ebkt;
-                    break;
+    if (!forclear) {
+        for (int i = 0; i < map->nbuckets; i++) {
+            struct bucket ebkt = map->buckets[i];
+            if (get_dib(&ebkt)) {
+                set_dib(&ebkt, 1);
+                size_t j = get_hash(&ebkt) & map2.mask;
+                while (1) {
+                    if (get_dib(&map2.buckets[j]) == 0) {
+                        map2.buckets[j] = ebkt;
+                        break;
+                    }
+                    if (get_dib(&map2.buckets[j]) < get_dib(&ebkt)) {
+                        struct bucket tmp = map2.buckets[j];
+                        map2.buckets[j] = ebkt;
+                        ebkt = tmp;
+                    }
+                    j = (j + 1) & map2.mask;
+                    set_dib(&ebkt, get_dib(&ebkt)+1);
                 }
-                if (get_dib(&map2.buckets[j]) < get_dib(&ebkt)) {
-                    struct bucket tmp = map2.buckets[j];
-                    map2.buckets[j] = ebkt;
-                    ebkt = tmp;
-                }
-                j = (j + 1) & map2.mask;
-                set_dib(&ebkt, get_dib(&ebkt)+1);
             }
         }
     }
+    size_t org_entsize = map->entsize;
+    uint64_t org_total = map->total;
     int org_cap = map->cap;
     int org_count = map->count;
     ctx->free(map->buckets);
     memcpy(map, &map2, sizeof(struct map));
     map->cap = org_cap;
     map->count = org_count;
+    map->entsize = org_entsize;
+    map->total = org_total;
     return true;
 }
 
@@ -852,7 +853,7 @@ static bool map_insert(struct map *map, struct entry *entry, uint32_t hash,
 {
     hash = clip_hash(hash);
     if (map->count >= map->growat) {
-        if (!resize(map, map->nbuckets*2, ctx)) {
+        if (!resize(map, map->nbuckets*2, ctx, false)) {
             *old = 0;
             return false;
         }
@@ -976,7 +977,7 @@ static void tryshrink(struct map *map, bool multi, struct pgctx *ctx) {
         // Just half the buckets
         cap = map->nbuckets / 2;
     }
-    resize(map, cap, ctx);
+    resize(map, cap, ctx, false);
 }
 
 // delete an entry at bucket position. not called directly
@@ -1025,7 +1026,6 @@ static size_t evict_entry(struct shard *shard, int shardidx,
         ctx->evicted(shardidx, reason, now, key, keylen, val,
             vallen, expires, flags, cas, ctx->udata);
     }
-    shard->clearcount -= (reason==POGOCACHE_REASON_CLEARED);
     size_t size = entry_memsize(entry);
     entry_free(entry, ctx);
     return size;
@@ -1048,7 +1048,7 @@ static void auto_evict_entry(struct shard *shard, int shardidx, uint32_t hash,
             continue;
         }
         struct entry *entry = get_entry(bkt);
-        int reason = entry_alive(entry, now, shard->cleartime);
+        int reason = entry_alive(entry, now);
         if (reason) {
             // Entry has expired. Evict this one instead.
             evict_entry(shard, shardidx, entry, now, reason, ctx);
@@ -1348,14 +1348,13 @@ static int loadop(const void *key, size_t keylen,
     uint32_t flags;
     uint64_t cas;
     entry_extract(entry, 0, 0, 0, &val, &vallen, &expires, &flags, &cas, ctx);
-    int reason = entry_alive(entry, now, shard->cleartime);
+    int reason = entry_alive(entry, now);
     if (reason) {
         // Entry is no longer alive. Evict the entry and clear the bucket.
         if (ctx->evicted) {
             ctx->evicted(shardidx, reason, now, key, keylen, val, vallen,
                 expires, flags, cas, ctx->udata);
         }
-        shard->clearcount -= (reason==POGOCACHE_REASON_CLEARED);
         entry_free(entry, ctx);
         delbkt(&shard->map, bidx);
         return POGOCACHE_NOTFOUND;
@@ -1415,7 +1414,7 @@ static int deleteop(const void *key, size_t keylen,
     int64_t expires;
     uint32_t flags;
     uint64_t cas;
-    int reason = entry_alive(entry, now, shard->cleartime);
+    int reason = entry_alive(entry, now);
     if (reason) {
         // Entry is no longer alive. It was already deleted from the map but
         // we still need to notify the user.
@@ -1425,7 +1424,6 @@ static int deleteop(const void *key, size_t keylen,
             ctx->evicted(shardidx, reason, now, key, keylen, val, vallen,
                 expires, flags, cas, ctx->udata);
         }
-        shard->clearcount -= (reason==POGOCACHE_REASON_CLEARED);
         tryshrink(&shard->map, false, ctx);
         entry_free(entry, ctx);
         return POGOCACHE_NOTFOUND;
@@ -1486,7 +1484,7 @@ static int storeop(const void *key, size_t keylen, const void *val,
         struct entry *old = map_get_entry(&shard->map, key, keylen, hash, &i, 
             ctx);
         if (old) {
-            int reason = entry_alive(old, now, shard->cleartime);
+            int reason = entry_alive(old, now);
             if (reason == 0) {
                 expires = entry_expires(old);
             }
@@ -1508,7 +1506,7 @@ static int storeop(const void *key, size_t keylen, const void *val,
         goto nomem;
     }
     if (old) {
-        int reason = entry_alive(old, now, shard->cleartime);
+        int reason = entry_alive(old, now);
         if (reason) {
             // There's an old entry, but it's no longer alive.
             // Treat this like an eviction and notify the user.
@@ -1523,7 +1521,6 @@ static int storeop(const void *key, size_t keylen, const void *val,
                 ctx->evicted(shardidx, reason, now, key, keylen, oval, ovallen,
                     oexpires, oflags, ocas, ctx->udata);
             }
-            shard->clearcount -= (reason==POGOCACHE_REASON_CLEARED);
             entry_free(old, ctx);
             old = 0;
         }
@@ -1650,14 +1647,13 @@ static int iterop(struct shard *shard, int shardidx, int64_t now,
         uint64_t cas;
         entry_extract(entry, &key, &keylen, buf, &val, &vallen,
             &expires, &flags, &cas, ctx);
-        int reason = entry_alive(entry, now, shard->cleartime);
+        int reason = entry_alive(entry, now);
         if (reason) {
 #ifdef EVICTONITER
             if (ctx->evicted) {
                 ctx->evicted(shardidx, reason, now, key, keylen, val, vallen,
                     expires, flags, cas, ctx->udata);
             }
-            shard->clearcount -= (reason==POGOCACHE_REASON_CLEARED);
             // Delete entry at bucket.
             delbkt(&shard->map, i);
             entry_free(entry, ctx);
@@ -1719,7 +1715,7 @@ int pogocache_iter(struct pogocache *cache, struct pogocache_iter_opts *opts) {
 }
 
 static size_t countop(struct shard *shard) {
-    return shard->map.count - shard->clearcount;
+    return shard->map.count;
 }
 
 /// Returns the number of entries in the cache.
@@ -1811,8 +1807,6 @@ size_t pogocache_size(struct pogocache *cache,
     return count;
 }
 
-
-
 static int sweepop(struct shard *shard, int shardidx, int64_t now,
     size_t *swept, size_t *kept, struct pgctx *ctx)
 {
@@ -1824,8 +1818,7 @@ static int sweepop(struct shard *shard, int shardidx, int64_t now,
         }
         struct entry *entry = get_entry(bkt);
         int64_t expires = entry_expires(entry);
-        int64_t etime = entry_time(entry);
-        int reason = entry_alive_exp(expires, etime, now, shard->cleartime);
+        int reason = entry_alive_exp(expires, now);
         if (reason == 0) {
             // entry is still alive
             (*kept)++;
@@ -1844,7 +1837,6 @@ static int sweepop(struct shard *shard, int shardidx, int64_t now,
             ctx->evicted(shardidx, reason, now, key, keylen, val, vallen,
                 expires, flags, cas, ctx->udata);
         }
-        shard->clearcount -= (reason==POGOCACHE_REASON_CLEARED);
         delbkt(&shard->map, i);
         entry_free(entry, ctx);
         (*swept)++;
@@ -1895,12 +1887,86 @@ void pogocache_sweep(struct pogocache *cache, size_t *swept, size_t *kept,
 }
 
 static int clearop(struct shard *shard, int shardidx, int64_t now, 
-    struct pgctx *ctx)
+    struct pgctx *ctx, struct bucket **buckets, int *nbuckets, bool deferfree)
 {
-    (void)shardidx, (void)ctx;
-    shard->cleartime = now;
-    shard->clearcount += (shard->map.count-shard->clearcount);
+    // loop over entries for callbacks
+    char buf[128];
+    for (int i = 0; i < shard->map.nbuckets; i++) {
+        struct bucket *bkt = &shard->map.buckets[i];
+        if (get_dib(bkt) == 0) {
+            continue;
+        }
+        struct entry *entry = get_entry(bkt);
+        if (ctx->evicted) {
+            const char *key, *val;
+            size_t keylen, vallen;
+            int64_t expires;
+            uint32_t flags;
+            uint64_t cas;
+            entry_extract(entry, &key, &keylen, buf, &val, &vallen, 
+                &expires, &flags, &cas, ctx);
+            int reason = entry_alive_exp(expires, now);
+            if (reason == 0) {
+                reason = POGOCACHE_REASON_CLEARED;
+            }
+            // Report eviction to user
+            ctx->evicted(shardidx, reason, now, key, keylen, val, vallen,
+                expires, flags, cas, ctx->udata);
+        }
+        if (!deferfree) {
+            entry_free(entry, ctx);
+        }
+    }
+    // initialize new map
+    struct map map2;
+    if (!map_init(&map2, INITCAP, ctx)) {
+        // alloc failed. Reuse existing map. Free each entry and reset map
+        if (deferfree) {
+            for (int i = 0; i < shard->map.nbuckets; i++) {
+                struct bucket *bkt = &shard->map.buckets[i];
+                if (get_dib(bkt)) {
+                    entry_free(get_entry(bkt), ctx);
+                }
+            }
+        }
+        memset(&shard->map.buckets, 0, 
+            sizeof(struct bucket)*shard->map.nbuckets);
+        shard->map.count = 0;
+        shard->map.entsize = 0;
+        *buckets = 0;
+        *nbuckets = 0;
+        return 0;
+    }
+    map2.total = shard->map.total;
+    if (deferfree) {
+        *buckets = shard->map.buckets;
+        *nbuckets = shard->map.nbuckets;
+    } else {
+        *buckets = 0;
+        *nbuckets = 0;
+        ctx->free(shard->map.buckets);
+    }
+    memcpy(&shard->map, &map2, sizeof(struct map));
     return 0;
+}
+
+static void aquireclearop(struct pogocache *cache, int shardidx, int64_t now, 
+    bool deferfree)
+{
+    struct pgctx *ctx = &cache->ctx;
+    int nbuckets = 0;
+    struct bucket *buckets = 0;
+    ACQUIRE_FOR_SCAN_AND_EXECUTE(int, shardidx,
+        clearop(shard, shardidx, now, ctx, &buckets, &nbuckets, deferfree);
+    );
+    if (buckets) {
+        for (int i = 0; i < nbuckets; i++) {
+            if (get_dib(&buckets[i])) {
+                entry_free(get_entry(&buckets[i]), ctx);
+            }
+        }
+        cache->ctx.free(buckets);
+    }
 }
 
 /// Clear the cache.
@@ -1914,15 +1980,11 @@ void pogocache_clear(struct pogocache *cache, struct pogocache_clear_opts *opts)
         if (opts->oneshardidx < 0 || opts->oneshardidx >= nshards) {
             return;
         }
-        ACQUIRE_FOR_SCAN_AND_EXECUTE(int, opts->oneshardidx,
-            clearop(shard, opts->oneshardidx, now, &cache->ctx);
-        );
+        aquireclearop(cache, opts->oneshardidx, now, opts->deferfree);
         return;
     }
     for (int i = 0; i < cache->ctx.nshards; i++) {
-        ACQUIRE_FOR_SCAN_AND_EXECUTE(int, i,
-            clearop(shard, i, now, &cache->ctx);
-        );
+        aquireclearop(cache, i, now, opts->deferfree);
     }
 }
 
@@ -1940,7 +2002,7 @@ static int sweeppollop(struct shard *shard, int shardidx, int64_t now,
         }
         struct entry *entry = get_entry(bkt);
         count++;
-        dead += (entry_alive(entry, now, shard->cleartime) != 0);
+        dead += (entry_alive(entry, now) != 0);
     }
     if (count == 0) {
         *percent = 0;

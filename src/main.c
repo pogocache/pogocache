@@ -94,7 +94,6 @@ int64_t procstart;  // proc start boot time, for uptime stat
 
 // Global atomic variable. These are safe to read and modify by other source
 // files, as long as those sources use "atomic_" methods.
-atomic_int_fast64_t flush_delay; // delay in seconds to next async flushall
 atomic_bool sweep;               // mark for async sweep, asap
 atomic_bool registered;          // registration is active
 atomic_bool lowmem;              // system is in low memory mode.
@@ -474,7 +473,6 @@ int main(int argc, char *argv[]) {
         uring = "no";
     }
 
-    atomic_init(&flush_delay, 0);
     atomic_init(&sweep, false);
     atomic_init(&registered, false);
 

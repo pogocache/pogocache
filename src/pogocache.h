@@ -160,6 +160,7 @@ struct pogocache_clear_opts {
     int64_t time;       // current time (default: use internal monotonic clock)
     bool oneshard;      // only clear one shard (default: all shards)
     int oneshardidx;    // index of one shard to clear, if oneshard is true.
+    bool deferfree;     // defer freeing entries until after unlocked.
 };
 
 struct pogocache_sweep_poll_opts {

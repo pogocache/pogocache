@@ -44,7 +44,6 @@ extern const char *persist;
 extern const int nthreads;
 extern const char *version;
 extern const char *githash;
-extern atomic_int_fast64_t flush_delay;
 extern atomic_bool sweep;
 extern atomic_bool lowmem;
 extern const int nshards;
@@ -676,6 +675,9 @@ static void cmdDBSIZE(struct conn *conn, struct args *args) {
 }
 
 struct flushctx { 
+    int64_t delay;
+    bool fast;
+    const char *cmdname;
     pthread_t th;
     int64_t time;
     int start;
@@ -692,9 +694,7 @@ static void *thflush(void *arg) {
     return 0;
 }
 
-static void bgflushwork(void *udata) {
-    (void)udata;
-    atomic_store(&flush_delay, 0);
+static void flushfast(void) {
     int64_t now = sys_now();
     int nprocs = sys_nprocs();
     if (nprocs > nshards) {
@@ -731,25 +731,61 @@ static void bgflushwork(void *udata) {
     xfree(ctxs);
 }
 
-static void bgflushdone(struct conn *conn, void *udata) {
-    const char *cmdname = udata;
+static void flush_work(void *udata) {
+    struct flushctx *ctx = udata;
+    int64_t start = sys_now();
+    if (verb > 0) {
+        printf(". flush started\n");
+    }
+    stat_cmd_flush_incr(0);
+    if (ctx->fast) {
+        flushfast();
+    } else {
+        struct pogocache_clear_opts opts = { 
+            .time = start,
+            .deferfree = true, // less thread blocking when defered
+        };
+        pogocache_clear(cache, &opts);
+    }
+    double elapsed = (sys_now()-start)/1e9;
+    if (verb > 0) {
+        printf(". flush finished in %.2fs\n", elapsed);
+    }
+}
+
+static void flush_done(struct conn *conn, void *udata) {
+    struct flushctx *ctx = udata;
     if (conn_proto(conn) == PROTO_POSTGRES) {
-        pg_write_completef(conn, "%s SYNC", cmdname);
+        pg_write_completef(conn, "%s SYNC", ctx->cmdname);
         pg_write_ready(conn, 'I');
     } else if (conn_proto(conn) == PROTO_MEMCACHE) {
         conn_write_raw_cstr(conn, "OK\r\n");
     } else {
         conn_write_string(conn, "OK");
     }
+    xfree(ctx);
 }
 
-// FLUSHALL [SYNC|ASYNC] [DELAY <seconds>]
+static void *thflush0(void *arg) {
+    struct flushctx *ctx = arg;
+    if (ctx->delay > 0) {
+        printf(". flush scheduled in %lld seconds\n", (long long)ctx->delay);
+        sleep(ctx->delay);
+    }
+    flush_work(ctx);
+    xfree(ctx);
+    return 0;
+}
+
+// FLUSHALL [SYNC|ASYNC] [FAST] [DELAY <seconds>]
+// FLUSHDB
+// FLUSH
 static void cmdFLUSHALL(struct conn *conn, struct args *args) {
     const char *cmdname = 
         args_eq(args, 0, "flush") ? "FLUSH" :
         args_eq(args, 0, "flushdb") ? "FLUSHDB" :
         "FLUSHALL";
-    stat_cmd_flush_incr(conn);
+    bool fast = false;
     bool async = false;
     int64_t delay = 0;
     for (size_t i = 1; i < args->len; i++) {
@@ -757,31 +793,43 @@ static void cmdFLUSHALL(struct conn *conn, struct args *args) {
             async = true;
         } else if (argeq(args, i, "sync")) {
             async = false;
+        } else if (argeq(args, i, "fast")) {
+            fast = true;
         } else if (argeq(args, i, "delay")) {
             i++;
             if (i == args->len) {
-                goto err_syntax;
+                conn_write_error(conn, ERR_SYNTAX_ERROR);
+                return;
             }
             bool ok = parse_i64(args->bufs[i].data, args->bufs[i].len, &delay);
-            if (!ok) {
-                conn_write_error(conn, "ERR invalid exptime argument");
+            if (!ok || delay < 0 || delay > 31536000) {
+                conn_write_error(conn, "ERR invalid delay argument");
                 return;
             }
             if (delay > 0) {
                 async = true;
+            } else {
+                delay = 0;
             }
         } else {
-            goto err_syntax;
+            conn_write_error(conn, ERR_SYNTAX_ERROR);
+            return;
         }
     }
+    struct flushctx *ctx = xmalloc(sizeof(struct flushctx));
+    memset(ctx, 0, sizeof(struct flushctx));
+    ctx->cmdname = cmdname;
+    ctx->fast = fast;
+    ctx->delay = delay;
     if (async) {
-        if (delay < 0) {
-            delay = 0;
+        pthread_t th;
+        int ret = pthread_create(&th, 0, thflush0, ctx);
+        if (ret == -1) {
+            xfree(ctx);
+            conn_write_error(conn, "ERR failed to do work");
+            return;
         }
-        delay = int64_mul_clamp(delay, SECOND);
-        delay = int64_add_clamp(delay, sys_now());
-        atomic_store(&flush_delay, delay);
-        // ticker will check the delay and perform the flush
+        pthread_detach(th);
         if (conn_proto(conn) == PROTO_POSTGRES) {
             pg_write_completef(conn, "%s ASYNC", cmdname);
             pg_write_ready(conn, 'I');
@@ -792,12 +840,12 @@ static void cmdFLUSHALL(struct conn *conn, struct args *args) {
         }
     } else {
         // Flush database is slow. cmdname is static and thread safe
-        conn_bgwork(conn, bgflushwork, bgflushdone, (void*)cmdname);
+        if (!conn_bgwork(conn, flush_work, flush_done, ctx)) {
+            conn_write_error(conn, "ERR failed to do work");
+            xfree(ctx);
+        }
         return;
     }
-    return;
-err_syntax:
-    conn_write_error(conn, ERR_SYNTAX_ERROR);
     return;
 }
 
@@ -1031,56 +1079,138 @@ static void cmdEXISTS(struct conn *conn, struct args *args) {
     }
 }
 
+struct sweepctx {
+    bool fast;
+    pthread_t th;
+    int64_t time;
+    int start;
+    int count;
+    size_t swept;
+    size_t kept;
+};
+
+static void *thsweep(void *arg) {
+    struct sweepctx *ctx = arg;
+    struct pogocache_sweep_opts opts = { .time = sys_now(), .oneshard = true };
+    for (int i = 0; i < ctx->count; i++) {
+        opts.oneshardidx = i+ctx->start;
+        size_t swept, kept;
+        pogocache_sweep(cache, &swept, &kept, &opts);
+        ctx->swept += swept;
+        ctx->kept += kept;
+    }
+    return 0;
+}
+
+static void sweepfast(size_t *swept, size_t *kept) {
+    size_t sweptc = 0;
+    size_t keptc = 0;
+    int64_t now = sys_now();
+    int nprocs = sys_nprocs();
+    if (nprocs > nshards) {
+        nprocs = nshards;
+    }
+    struct sweepctx *ctxs = xmalloc(nprocs*sizeof(struct sweepctx));
+    memset(ctxs, 0, nprocs*sizeof(struct sweepctx));
+    int start = 0;
+    for (int i = 0; i < nprocs; i++) {
+        struct sweepctx *ctx = &ctxs[i];
+        ctx->fast = true;
+        ctx->start = start;
+        ctx->count = nshards/nprocs;
+        ctx->time = now;
+        if (i == nprocs-1) {
+            ctx->count = nshards-ctx->start;
+        }
+        if (pthread_create(&ctx->th, 0, thsweep, ctx) == -1) {
+            ctx->th = 0;
+        }
+        start += ctx->count;
+    }
+    for (int i = 0; i < nprocs; i++) {
+        struct sweepctx *ctx = &ctxs[i];
+        if (ctx->th == 0) {
+            thsweep(ctx);
+        }
+    }
+    for (int i = 0; i < nprocs; i++) {
+        struct sweepctx *ctx = &ctxs[i];
+        if (ctx->th != 0) {
+            pthread_join(ctx->th, 0);
+        }
+        sweptc += ctx->swept;
+        keptc += ctx->kept;
+    }
+    *swept = sweptc;
+    *kept = keptc;
+    xfree(ctxs);
+}
+
 static void sweep_work(void *udata) {
-    (void)udata;
+    struct sweepctx *ctx = udata;
     int64_t start = sys_now();
     size_t swept;
     size_t kept;
-    struct pogocache_sweep_opts opts = {
-        .time = start,
-    };
-    printf(". sweep started\n");
-    pogocache_sweep(cache, &swept, &kept, &opts);
+    if (verb > 0) {
+        printf(". sweep started\n");
+    }
+    if (ctx->fast) {
+        sweepfast(&swept, &kept);
+    } else {
+        struct pogocache_sweep_opts opts = { .time = start };
+        pogocache_sweep(cache, &swept, &kept, &opts);
+    }
     double elapsed = (sys_now()-start)/1e9;
-    printf(". sweep finished in %.2fs, (swept=%zu, kept=%zu) \n", elapsed, 
-        swept, kept);
+    if (verb > 0) {
+        printf(". sweep finished in %.2fs, (swept=%zu, kept=%zu) \n", elapsed, 
+            swept, kept);
+    }
 }
 
 static void sweep_done(struct conn *conn, void *udata) {
-    (void)udata;
+    struct sweepctx *ctx = udata;
     if (conn_proto(conn) == PROTO_POSTGRES) {
         pg_write_completef(conn, "SWEEP SYNC");
         pg_write_ready(conn, 'I');
     } else {
         conn_write_string(conn, "OK");
     }
+    xfree(ctx);
 }
 
-static void *thsweep(void *arg) {
-    (void)arg;
-    sweep_work(0);
+static void *thsweep0(void *arg) {
+    struct sweepctx *ctx = arg;
+    sweep_work(ctx);
+    xfree(ctx);
     return 0;
 }
 
-// SWEEP [ASYNC]
+// SWEEP [ASYNC] [FAST]
 static void cmdSWEEP(struct conn *conn, struct args *args) {
     if (args->len > 2) {
         conn_write_error(conn, ERR_WRONG_NUM_ARGS);
         return;
     }
+    bool fast = false;
     bool async = false;
-    if (args->len == 2) {
-        if (argeq(args, 1, "async")) {
+    for (size_t i = 1; i < args->len; i++) {
+        if (argeq(args, i, "async")) {
             async = true;
+        } else if (argeq(args, i, "fast")) {
+            fast = true;
         } else {
             conn_write_error(conn, ERR_SYNTAX_ERROR);
             return;
         }
     }
+    struct sweepctx *ctx = xmalloc(sizeof(struct sweepctx));
+    memset(ctx, 0, sizeof(struct sweepctx));
+    ctx->fast = fast;
     if (async) {
         pthread_t th;
-        int ret = pthread_create(&th, 0, thsweep, 0);
+        int ret = pthread_create(&th, 0, thsweep0, ctx);
         if (ret == -1) {
+            xfree(ctx);
             conn_write_error(conn, "ERR failed to do work");
             return;
         }
@@ -1092,7 +1222,8 @@ static void cmdSWEEP(struct conn *conn, struct args *args) {
             conn_write_string(conn, "OK");
         }
     } else {
-        if (!conn_bgwork(conn, sweep_work, sweep_done, 0)) {
+        if (!conn_bgwork(conn, sweep_work, sweep_done, ctx)) {
+            xfree(ctx);
             conn_write_error(conn, "ERR failed to do work");
         }
     }
