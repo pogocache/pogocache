@@ -64,7 +64,13 @@ int maxconns = 1024;          // maximum number of sockets
 char *autosweep = "yes";      // perform automatic sweeps of expired entries
 char *noticker = "no";
 char *warmup = "yes";
-char *allocator = "mimalloc"; //
+#if !defined(NOMIMALLOC)
+char *allocator = "mimalloc";
+#elif !defined(NOJEMALLOC)
+char *allocator = "jemalloc";
+#else
+char *allocator = "stock";
+#endif
 
 // Global variables calculated in main().
 // These should never change during the lifetime of the process.
@@ -532,6 +538,42 @@ int main(int argc, char *argv[]) {
 
     usecolor = isatty(fileno(stdout));
 
+    // Allocator
+    useallocator = -1;
+#ifndef NOMIMALLOC
+    if (useallocator == -1 && strcmp(allocator, "mimalloc") == 0) {
+        useallocator = ALLOCATOR_MIMALLOC;
+    }
+#endif
+#ifndef NOJEMALLOC
+    if (useallocator == -1 && strcmp(allocator, "jemalloc") == 0) {
+        useallocator = ALLOCATOR_JEMALLOC;
+    }
+#endif
+    if (useallocator == -1 && strcmp(allocator, "stock") == 0) {
+        useallocator = ALLOCATOR_STOCK;
+    }
+    if (useallocator == -1) {
+        INVALID_FLAG("allocator", allocator);
+    }
+
+    // Number of threads
+    if (nthreads <= 0) {
+        nthreads = sys_nprocs();
+    } else if (nthreads > 4096) {
+        nthreads = 4096; 
+    }
+
+    // Number of shards
+    if (nshards <= 0) {
+        nshards = 4096;
+    } else if (nshards > 65536) {
+        nshards = 65536;
+    }
+
+    xmalloc_init(nthreads);
+
+
     if (strcmp(evict, "yes") == 0) {
         useevict = true;
     } else if (strcmp(evict, "no") == 0) {
@@ -597,16 +639,6 @@ int main(int argc, char *argv[]) {
         INVALID_FLAG("autosweep", autosweep);
     }
 
-    if (strcmp(allocator, "mimalloc") == 0) {
-        useallocator = ALLOCATOR_MIMALLOC;
-    } else if (strcmp(allocator, "jemalloc") == 0) {
-        useallocator = ALLOCATOR_JEMALLOC;
-    } else if (strcmp(allocator, "stock") == 0) {
-        useallocator = ALLOCATOR_STOCK;
-    } else {
-        INVALID_FLAG("allocator", allocator);
-    }
-
 #ifndef __linux__
     bool useuring = false;
 #else
@@ -643,19 +675,6 @@ int main(int argc, char *argv[]) {
         usesixpack = false;
     } else {
         INVALID_FLAG("sixpack", keysixpack);
-    }
-
-    // Threads
-    if (nthreads <= 0) {
-        nthreads = sys_nprocs();
-    } else if (nthreads > 4096) {
-        nthreads = 4096; 
-    }
-
-    if (nshards <= 0) {
-        nshards = 4096;
-    } else if (nshards > 65536) {
-        nshards = 65536;
     }
 
     if (loadfactor < MINLOADFACTOR_RH) {

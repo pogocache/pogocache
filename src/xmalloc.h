@@ -14,9 +14,10 @@
 #include <stdbool.h>
 
 #define ALLOCATOR_STOCK     0
-#define ALLOCATOR_JEMALLOC  1
-#define ALLOCATOR_MIMALLOC  2
+#define ALLOCATOR_MIMALLOC  1
+#define ALLOCATOR_JEMALLOC  2
 
+void xmalloc_init(int nthreads);
 size_t xallocs(void);
 void *xmalloc(size_t size);
 void *xrealloc(void *ptr, size_t size);
