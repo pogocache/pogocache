@@ -8,7 +8,7 @@
 // For alternative licensing options or general questions, please contact
 // us at licensing@polypointlabs.com.
 //
-// Unit pogocache.c is the primary caching engine library, which is designed
+// Unit pogocache.c is the primary caching engine library which is designed
 // to be standalone and embeddable.
 #include <stdbool.h>
 #include <inttypes.h>
@@ -30,9 +30,9 @@
 #define DEFSHARDS        4096   // default number of shards
 #define INITCAP          64     // intial number of buckets per shard
 
+// #define NOSIXPACK
 // #define DBGCHECKENTRY
 // #define EVICTONITER
-// #define HALFSECONDTIME
 // #define NO48BITPTRS
 
 #if INTPTR_MAX == INT64_MAX
@@ -259,16 +259,16 @@ static int varint_write_u64(void *data, uint64_t x) {
     return n;
 }
 
-static int varint_read_u64(const void *data, size_t len, uint64_t *x) {
+static int varint_read_u64(const void *data, uint64_t *x) {
     const uint8_t *bytes = data;
-    if (len > 0 && bytes[0] < 128) {
+    if (bytes[0] < 128) {
         *x = bytes[0];
         return 1;
     }
     uint64_t b;
     *x = 0;
     size_t i = 0;
-    while (i < len && i < 10) {
+    while (1) {
         b = bytes[i]; 
         *x |= (b & 127) << (7 * i); 
         if (b < 128) {
@@ -276,15 +276,7 @@ static int varint_read_u64(const void *data, size_t len, uint64_t *x) {
         }
         i++;
     }
-    return i == 10 ? -1 : 0;
 }
-
-#ifdef HALFSECONDTIME
-typedef uint32_t etime_t;
-#else
-typedef int64_t etime_t;
-#endif
-
 
 // Mostly a copy of the pogocache_opts, but used internally
 // See the opts_to_ctx function for translation.
@@ -309,65 +301,65 @@ struct pgctx {
 };
 
 // The entry structure is a simple allocation with all the fields, being 
-// variable in size, slammed together contiguously. There's a one byte header
-// that provides information about what is available in the structure.
-// The format is: (header,time,expires?,flags?,cas?,key,value)
-// The expires, flags, and cas fields are optional. The optionality depends on
-// header bit flags.
-struct entry;
+// variable in size, slammed together contiguously. There's a timestamp,
+// reference counter, and various fields the describe the contents of data.
+// The data field contains the variable sized data, including key, value, 
+// expiration, flags, etc. The size of the entire allocation of the entry is
+// stored as a prefix in the data field, and it can be 1, 2, 4, or 8 bytes.
+struct entry {
+    int64_t time;           // entry timestamp
+    atomic_int rc;          // reference counter
+    unsigned memszsz:2;     // memory size field size, 0=1, 1=2, 2=4, 3=8
+    unsigned has_expires:1; // has 64-bit expiration
+    unsigned has_flags:1;   // has 32-bit flags
+    unsigned has_sixpack:1; // key is sixpack encoded
+    uint8_t data[];
+};
 
-// Returns the sizeof the entry struct, which takes up no space at all.
-// This would be like doing a sizeof(struct entry), if entry had a structure.
-static size_t entry_struct_size(void) {
-    return 0;
-}
-
-// Returns the data portion of the entry, which is the entire allocation.
-static const uint8_t *entry_data(const struct entry *entry) {
-    return (uint8_t*)entry;
+static size_t entry_memsize(const struct entry *entry) {
+    const uint8_t *p = entry->data;
+    if (entry->memszsz == 0) {
+        return *p;
+    }
+    if (entry->memszsz == 1) {
+        uint16_t x;
+        memcpy(&x, p, 2);
+        return x;
+    }
+    if (entry->memszsz == 2) {
+        uint32_t x;
+        memcpy(&x, p, 4);
+        return x;
+    }
+    uint64_t x;
+    memcpy(&x, p, 8);
+    return x;
 }
 
 static int64_t entry_expires(const struct entry *entry) {
-    const uint8_t *p = entry_data(entry);
-    uint8_t hdr = *(p++); // hdr
-    p += sizeof(etime_t); // time
+    const uint8_t *p = entry->data;
+    p += 1<<entry->memszsz;
     int64_t x = 0;
-    if ((hdr>>0)&1) {
+    if (entry->has_expires) {
         memcpy(&x, p, 8);
     }
     return x;
 }
 
 static int64_t entry_time(struct entry *entry) {
-    const uint8_t *p = entry_data(entry);
-    etime_t etime;
-    memcpy(&etime, p+1, sizeof(etime_t));
-#ifdef HALFSECONDTIME
-    int64_t time = (int64_t)etime * INT64_C(500000000);
-#else 
-    int64_t time = etime;
-#endif    
-    return time;
+    return entry->time;
 }
 
 static void entry_settime(struct entry *entry, int64_t time) {
-    const uint8_t *p = entry_data(entry);
-#ifdef HALFSECONDTIME
-    // Eviction time is stored as half seconds.
-    etime_t etime = time / INT64_C(500000000);
-    etime = etime > UINT32_MAX ? UINT32_MAX : etime;
-#else
-    etime_t etime = time;
-#endif
-    memcpy((uint8_t*)(p+1), &etime, sizeof(etime_t));
+    entry->time = time;
 }
 
 static int entry_alive_exp(int64_t expires, int64_t etime, int64_t now,
     int64_t cleartime)
 {
     return etime < cleartime ? POGOCACHE_REASON_CLEARED :
-           expires > 0 && expires <= now ? POGOCACHE_REASON_EXPIRED :
-           0;
+        expires > 0 && expires <= now ? POGOCACHE_REASON_EXPIRED :
+        0;
 }
 
 static int entry_alive(struct entry *entry, int64_t now, int64_t cleartime) {
@@ -376,44 +368,53 @@ static int entry_alive(struct entry *entry, int64_t now, int64_t cleartime) {
     return entry_alive_exp(expires, etime, now, cleartime);
 }
 
-static uint64_t entry_cas(const struct entry *entry) {
-    const uint8_t *p = entry_data(entry);
-    uint8_t hdr = *(p++); // hdr
-    p += sizeof(etime_t); // time
-    if ((hdr>>0)&1) {
-        p += 8; // expires
+static uint64_t entry_cas(const struct entry *entry, struct pgctx *ctx) {
+    if (!ctx->usecas) {
+        return 0;
     }
-    if ((hdr>>1)&1) {
-        p += 4; // flags
+    const uint8_t *p = entry->data;
+    p += 1<<entry->memszsz;
+    if (entry->has_expires) {
+        p += 8;
+    }
+    if (entry->has_flags) {
+        p += 4;
     }
     uint64_t x = 0;
-    if ((hdr>>2)&1) {
-        memcpy(&x, p, 8);
-    }
+    memcpy(&x, p, 8);
     return x;
+}
+
+// returns the raw key. sixpack will be returned in it's raw format
+static const char *entry_rawkey(const struct entry *entry, size_t *keylen_out,
+    struct pgctx *ctx)
+{
+    const uint8_t *p = entry->data;
+    p += 1<<entry->memszsz;
+    if (entry->has_expires) {
+        p += 8; // expires
+    }
+    if (entry->has_flags) {
+        p += 4; // flags
+    }
+    if (ctx->usecas) {
+        p += 8; // cas
+    }
+    uint64_t x;
+    p += varint_read_u64(p, &x); // keylen
+    size_t keylen = x;
+    char *key = (char*)p;
+    *keylen_out = keylen;
+    return key;
 }
 
 // returns the key. If using sixpack make sure to copy the result asap.
 static const char *entry_key(const struct entry *entry, size_t *keylen_out,
-    char buf[128])
+    char buf[128], struct pgctx *ctx)
 {
-    const uint8_t *p = entry_data(entry);
-    const uint8_t hdr = *(p++); // hdr
-    p += sizeof(etime_t); // time
-    if ((hdr>>0)&1) {
-        p += 8; // expires
-    }
-    if ((hdr>>1)&1) {
-        p += 4; // flags
-    }
-    if ((hdr>>2)&1) {
-        p += 8; // cas
-    }
-    uint64_t x;
-    p += varint_read_u64(p, 10, &x); // keylen
-    size_t keylen = x;
-    char *key = (char*)p;
-    if ((hdr>>3)&1) {
+    size_t keylen;
+    const char *key = entry_rawkey(entry, &keylen, ctx);
+    if (entry->has_sixpack) {
         keylen = unsixpack(key, (int)keylen, buf);
         key = buf;
     }
@@ -421,43 +422,20 @@ static const char *entry_key(const struct entry *entry, size_t *keylen_out,
     return key;
 }
 
-// returns the raw key. sixpack will be returned in it's raw format
-static const char *entry_rawkey(const struct entry *entry, size_t *keylen_out) {
-    const uint8_t *p = entry_data(entry);
-    const uint8_t hdr = *(p++); // hdr
-    p += sizeof(etime_t); // time
-    if ((hdr>>0)&1) {
-        p += 8; // expires
-    }
-    if ((hdr>>1)&1) {
-        p += 4; // flags
-    }
-    if ((hdr>>2)&1) {
-        p += 8; // cas
-    }
-    uint64_t x;
-    p += varint_read_u64(p, 10, &x); // keylen
-    size_t keylen = x;
-    char *key = (char*)p;
-    *keylen_out = keylen;
-    return key;
-}
-
 static bool entry_sixpacked(const struct entry *entry) {
-    const uint8_t *p = entry_data(entry);
-    uint8_t hdr = *(p);
-    return (hdr>>3)&1;
+    return entry->has_sixpack;
 }
 
 static size_t entry_extract(const struct entry *entry, const char **key,
-    size_t *keylen, char buf[128], const char **val, size_t *vallen, 
+    size_t *keylen, char buf[128], const char **val, size_t *vallen,
     int64_t *expires, uint32_t *flags, uint64_t *cas,
     struct pgctx *ctx)
 {
-    const uint8_t *p = entry_data(entry);
-    uint8_t hdr = *(p++); // hdr
-    p += sizeof(etime_t); // time
-    if ((hdr>>0)&1) {
+    (void)ctx;
+    const uint8_t *p = entry->data;
+    size_t memsize = entry_memsize(entry);
+    p += 1<<entry->memszsz;
+    if (entry->has_expires) {
         if (expires) {
             memcpy(expires, p, 8);
         }
@@ -467,7 +445,7 @@ static size_t entry_extract(const struct entry *entry, const char **key,
             *expires = 0;
         }
     }
-    if ((hdr>>1)&1) {
+    if (entry->has_flags) {
         if (flags) {
             memcpy(flags, p, 4);
         }
@@ -488,55 +466,34 @@ static size_t entry_extract(const struct entry *entry, const char **key,
         }
     }
     uint64_t x;
-    p += varint_read_u64(p, 10, &x); // keylen
+    p += varint_read_u64(p, &x); // keylen
     if (key) {
         *key = (char*)p;
         *keylen = x;
-        if ((hdr>>3)&1) {
+        if (entry->has_sixpack) {
             *keylen = unsixpack(*key, (int)*keylen, buf);
             *key = buf;
         }
     }
-    p += x;                          // key
-    p += varint_read_u64(p, 10, &x); // vallen
+    p += x; // key
     if (val) {
         *val = (char*)p;
-        *vallen = x;
+        *vallen = memsize-(p-entry->data)-sizeof(struct entry);
     }
-    p += x;                          // val
-    return entry_struct_size()+(p-(uint8_t*)entry);
+    return memsize;
 }
 
-static size_t entry_memsize(const struct entry *entry,
-    struct pgctx *ctx)
-{
-    const uint8_t *p = entry_data(entry);
-    uint8_t hdr = *(p++); // hdr
-    p += sizeof(etime_t); // time
-    if ((hdr>>0)&1) {
-        p += 8; // expires
-    }
-    if ((hdr>>1)&1) {
-        p += 4; // flags
-    }
-    if (ctx->usecas) {
-        p += 8; // cas
-    }
-    uint64_t x;
-    p += varint_read_u64(p, 10, &x); // keylen
-    p += x;                          // key
-    p += varint_read_u64(p, 10, &x); // vallen
-    p += x;                          // val
-    return entry_struct_size()+(p-(uint8_t*)entry);
-}
-
-// The 'cas' param should always be set to zero unless loading from disk. 
+// The 'cas' param should always be set to zero unless loading from disk.
 // Setting to zero will set a new unique cas to the entry.
 static struct entry *entry_new(const char *key, size_t keylen, const char *val,
     size_t vallen, int64_t expires, uint32_t flags, uint64_t cas,
     struct pgctx *ctx)
 {
+#ifdef NOSIXPACK
+    bool usesixpack = false;
+#else
     bool usesixpack = !ctx->nosixpack;
+#endif
 #ifdef DBGCHECKENTRY
     // printf("entry_new(key=[%.*s], keylen=%zu, val=[%.*s], vallen=%zu, "
     //     "expires=%" PRId64 ", flags=%" PRId32 ", cas=%" PRIu64 ", "
@@ -550,70 +507,91 @@ static struct entry *entry_new(const char *key, size_t keylen, const char *val,
     const char *oval = val;
     size_t ovallen = vallen;
 #endif
-    uint8_t hdr = 0;
     uint8_t keylenbuf[10];
-    uint8_t vallenbuf[10];
-    int nexplen, nflagslen, ncaslen, nkeylen, nvallen;
+    size_t prefixlen = 0;
     if (expires > 0) {
-        hdr |= 1;
-        nexplen = 8;
-    } else {
-        nexplen = 0;
+        prefixlen += 8;
     }
     if (flags > 0) {
-        hdr |= 2;
-        nflagslen = 4;
-    } else {
-        nflagslen = 0;
+        prefixlen += 4;
     }
     if (ctx->usecas) {
-        hdr |= 4;
-        ncaslen = 8;
-    } else {
-        ncaslen = 0;
+        prefixlen += 8;
     }
+    bool has_sixpack = 0;
     char buf[128];
     if (usesixpack && keylen <= 128) {
         size_t len = sixpack(key, keylen, buf);
         if (len > 0) {
-            hdr |= 8;
+            has_sixpack = 1;
             keylen = len;
             key = buf;
         }
     }
-    nkeylen = varint_write_u64(keylenbuf, keylen);
-    nvallen = varint_write_u64(vallenbuf, vallen);
+    size_t nkeylen = varint_write_u64(keylenbuf, keylen);
     struct entry *entry_out = 0;
-    size_t size = entry_struct_size()+1+sizeof(etime_t)+nexplen+nflagslen+
-        ncaslen+nkeylen+keylen+nvallen+vallen;
+    size_t size = sizeof(struct entry)+prefixlen+nkeylen+keylen+vallen;
+    // Calculate the number of bytes needed to store the size of the entire
+    // allocation.
+    int memszsz;
+    if (size <= 0xFF-1) {
+        memszsz = 0;
+        size += 1;
+    } else if (size <= 0xFFFF-2) {
+        memszsz = 1;
+        size += 2;
+    } else if (size <= 0xFFFFFFFF-4) {
+        memszsz = 2;
+        size += 4;
+    } else {
+       memszsz = 3;
+       size += 8;
+    }
     // printf("malloc=%p size=%zu, ctx=%p\n", ctx->malloc, size, ctx);
     void *mem = ctx->malloc(size);
     struct entry *entry = mem;
     if (!entry) {
         return 0;
     }
-    uint8_t *p = (void*)entry_data(entry);
-    *(p++) = hdr;
-    memset(p, 0, sizeof(etime_t));
-    p += sizeof(etime_t); // time
-    if (nexplen > 0) {
-        memcpy(p, &expires, nexplen);
-        p += nexplen;
+    entry->time = 0;
+    atomic_init(&entry->rc, 1);
+    entry->memszsz = memszsz;
+    entry->has_expires = expires > 0;
+    entry->has_flags = flags > 0;
+    entry->has_sixpack = has_sixpack;
+    uint8_t *p = (void*)entry->data;
+    if (memszsz == 0) {
+        *p = size;
+        p++;
+    } else if (memszsz == 1) {
+        uint16_t x = size;
+        memcpy(p, &x, 2);
+        p += 2;
+    } else if (memszsz == 2) {
+        uint32_t x = size;
+        memcpy(p, &x, 4);
+        p += 4;
+    } else {
+        uint64_t x = size;
+        memcpy(p, &x, 8);
+        p += 8;
     }
-    if (nflagslen > 0) {
-        memcpy(p, &flags, nflagslen);
-        p += nflagslen;
+    if (expires > 0) {
+        memcpy(p, &expires, 8);
+        p += 8;
     }
-    if (ncaslen > 0) {
-        memcpy(p, &cas, ncaslen);
-        p += ncaslen;
+    if (flags > 0) {
+        memcpy(p, &flags, 4);
+        p += 4;
+    }
+    if (ctx->usecas) {
+        memcpy(p, &cas, 8);
+        p += 8;
     }
     memcpy(p, keylenbuf, nkeylen);
     p += nkeylen;
     memcpy(p, key, keylen);
     p += keylen;
-    memcpy(p, vallenbuf, nvallen);
-    p += nvallen;
     memcpy(p, val, vallen);
     p += vallen;
     entry_out = entry;
@@ -629,30 +607,39 @@ static struct entry *entry_new(const char *key, size_t keylen, const char *val,
         &flags2, &cas2, ctx);
     assert(expires2 == oexpires);
     assert(flags2 == oflags);
-    assert(cas2 == ocas);
+    if (ctx->usecas) {
+        assert(cas2 == ocas);
+    }
     assert(keylen2 == okeylen);
     assert(memcmp(key2, okey, okeylen) == 0);
     assert(vallen2 == ovallen);
     assert(memcmp(val2, oval, ovallen) == 0);
+    // printf("%zu\n", size);
+    assert(entry_memsize(entry_out) == size);
 #endif
     return entry_out;
 }
 
 static void entry_free(struct entry *entry, struct pgctx *ctx) {
+    if (atomic_fetch_sub(&entry->rc, 1) > 1) {
+        return;
+    }
     ctx->free(entry);
 }
 
-static int entry_compare(const struct entry *a, const struct entry *b) {
+static int entry_compare(const struct entry *a, const struct entry *b,
+    struct pgctx *ctx)
+{
     size_t akeylen, bkeylen;
     char buf1[256], buf2[256];
     const char *akey;
     const char *bkey;
     if (entry_sixpacked(a) == entry_sixpacked(b)) {
-        akey = entry_rawkey(a, &akeylen);
-        bkey = entry_rawkey(b, &bkeylen);
+        akey = entry_rawkey(a, &akeylen, ctx);
+        bkey = entry_rawkey(b, &bkeylen, ctx);
     } else {
-        akey = entry_key(a, &akeylen, buf1);
-        bkey = entry_key(b, &bkeylen, buf2);
+        akey = entry_key(a, &akeylen, buf1, ctx);
+        bkey = entry_key(b, &bkeylen, buf2, ctx);
     }
     size_t size = akeylen < bkeylen ? akeylen : bkeylen;
     int cmp = memcmp(akey, bkey, size);
@@ -687,7 +674,6 @@ struct map {
     struct bucket *buckets;
     uint64_t total;  // current entry count
     size_t entsize;  // memory size of all entries
-    
 };
 
 struct shard {
@@ -871,7 +857,7 @@ static bool map_insert(struct map *map, struct entry *entry, uint32_t hash,
             return false;
         }
     }
-    map->entsize += entry_memsize(entry, ctx);
+    map->entsize += entry_memsize(entry);
     struct bucket ebkt;
     set_entry(&ebkt, entry);
     set_hash(&ebkt, hash);
@@ -887,11 +873,12 @@ static bool map_insert(struct map *map, struct entry *entry, uint32_t hash,
             return true;
         }
         if (get_hash(&ebkt) == get_hash(&map->buckets[i]) && 
-            entry_compare(get_entry(&ebkt), get_entry(&map->buckets[i])) == 0)
+            entry_compare(get_entry(&ebkt), get_entry(&map->buckets[i]), 
+                ctx) == 0)
         {
             // replaced
             *old = get_entry(&map->buckets[i]);
-            map->entsize -= entry_memsize(*old, ctx);
+            map->entsize -= entry_memsize(*old);
             set_entry(&map->buckets[i], get_entry(&ebkt));
             return true;
         }
@@ -906,20 +893,21 @@ static bool map_insert(struct map *map, struct entry *entry, uint32_t hash,
 }
 
 static bool bucket_eq(struct map *map, size_t i, const char *key,
-    size_t keylen, uint32_t hash)
+    size_t keylen, uint32_t hash, struct pgctx *ctx)
 {
     if (get_hash(&map->buckets[i]) != hash) {
         return false;
     }
     size_t keylen2;
     char buf[128];
-    const char *key2 = entry_key(get_entry(&map->buckets[i]), &keylen2, buf);
+    const char *key2 = entry_key(get_entry(&map->buckets[i]), &keylen2, buf,
+        ctx);
     return keylen == keylen2 && memcmp(key, key2, keylen) == 0;
 }
 
 // Returns the bucket index for key, or -1 if not found.
 static int map_get_bucket(struct map *map, const char *key, size_t keylen,
-    uint32_t hash)
+    uint32_t hash, struct pgctx *ctx)
 {
     hash = clip_hash(hash);
     size_t i = hash & map->mask;
@@ -928,7 +916,7 @@ static int map_get_bucket(struct map *map, const char *key, size_t keylen,
         if (get_dib(bkt) == 0) {
             return -1;
         }
-        if (bucket_eq(map, i, key, keylen, hash)) {
+        if (bucket_eq(map, i, key, keylen, hash, ctx)) {
             return i;
         }
         i = (i + 1) & map->mask;
@@ -936,9 +924,9 @@ static int map_get_bucket(struct map *map, const char *key, size_t keylen,
 }
 
 static struct entry *map_get_entry(struct map *map, const char *key,
-    size_t keylen, uint32_t hash, int *bkt_idx_out)
+    size_t keylen, uint32_t hash, int *bkt_idx_out, struct pgctx *ctx)
 {
-    int i = map_get_bucket(map, key, keylen, hash);
+    int i = map_get_bucket(map, key, keylen, hash, ctx);
     *bkt_idx_out = i;
     return i >= 0 ? get_entry(&map->buckets[i]) : 0;
 }
@@ -992,12 +980,10 @@ static void tryshrink(struct map *map, bool multi, struct pgctx *ctx) {
 }
 
 // delete an entry at bucket position. not called directly
-static struct entry *delentry_at_bkt(struct map *map, size_t i, 
-    struct pgctx *ctx)
-{
+static struct entry *delentry_at_bkt(struct map *map, size_t i) {
     struct entry *old = get_entry(&map->buckets[i]);
     assert(old);
-    map->entsize -= entry_memsize(old, ctx);
+    map->entsize -= entry_memsize(old);
     delbkt(map, i);
     return old;
 }
@@ -1011,8 +997,8 @@ static struct entry *map_delete(struct map *map, const char *key,
         if (get_dib(&map->buckets[i]) == 0) {
             return 0;
         }
-        if (bucket_eq(map, i, key, keylen, hash)) {
-            return delentry_at_bkt(map, i, ctx);
+        if (bucket_eq(map, i, key, keylen, hash, ctx)) {
+            return delentry_at_bkt(map, i);
         }
         i = (i + 1) & map->mask;
     }
@@ -1023,10 +1009,10 @@ static size_t evict_entry(struct shard *shard, int shardidx,
 {
     char buf[128];
     size_t keylen;
-    const char *key = entry_key(entry, &keylen, buf);
+    const char *key = entry_key(entry, &keylen, buf, ctx);
     uint32_t hash = th64(key, keylen, ctx->seed);
     struct entry *del = map_delete(&shard->map, key, keylen, hash, ctx);
-    assert(del == entry); (void)del;
+    assert(del == entry);
     if (ctx->evicted) {
         // Notify user that an entry was evicted.
         const char *val;
@@ -1040,7 +1026,7 @@ static size_t evict_entry(struct shard *shard, int shardidx,
             vallen, expires, flags, cas, ctx->udata);
     }
     shard->clearcount -= (reason==POGOCACHE_REASON_CLEARED);
-    size_t size = entry_memsize(entry, ctx);
+    size_t size = entry_memsize(entry);
     entry_free(entry, ctx);
     return size;
 }
@@ -1349,7 +1335,7 @@ static int loadop(const void *key, size_t keylen,
     opts = opts ? opts : &defloadopts;
     int64_t now = opts->time > 0 ? opts->time : getnow();
     // Get the entry bucket index for the entry with key.
-    int bidx = map_get_bucket(&shard->map, key, keylen, hash);
+    int bidx = map_get_bucket(&shard->map, key, keylen, hash, ctx);
     if (bidx == -1) {
         return POGOCACHE_NOTFOUND;
     }
@@ -1497,7 +1483,8 @@ static int storeop(const void *key, size_t keylen, const void *val,
         // User wants to keep the existing ttl. Get the existing entry from the
         // map first and take its expiration.
         int i;
-        struct entry *old = map_get_entry(&shard->map, key, keylen, hash, &i);
+        struct entry *old = map_get_entry(&shard->map, key, keylen, hash, &i, 
+            ctx);
         if (old) {
             int reason = entry_alive(old, now, shard->cleartime);
             if (reason == 0) {
@@ -1546,7 +1533,7 @@ static int storeop(const void *key, size_t keylen, const void *val,
         if (opts->casop) {
             // User is requesting the cas operation.
             if (ctx->usecas) {
-                uint64_t old_cas = entry_cas(old);
+                uint64_t old_cas = entry_cas(old, ctx);
                 if (opts->cas != old_cas) {
                     // CAS test failed.
                     // printf(". cas failed: expected %" PRIu64 ", "
