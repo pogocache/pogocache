@@ -42,6 +42,9 @@
 #define POGOCACHE_REASON_LOWMEM  2 // system is low on memory.
 #define POGOCACHE_REASON_CLEARED 3 // pogocache_clear called.
 
+struct pogocache;
+struct pogocache_entry;
+
 struct pogocache_opts {
     void *(*malloc)(size_t);      // use a custom malloc function
     void (*free)(void*);          // use a custom free function
@@ -52,6 +55,13 @@ struct pogocache_opts {
     void (*evicted)(int shard, int reason, int64_t time, const void *key,
         size_t keylen, const void *value, size_t valuelen, int64_t expires,
         uint32_t flags, uint64_t cas, void *udata);
+    // The 'notify' callback is called for every change to the cache.
+    // The new and old entries are provided, which both will have the same key.
+    // Inserted (new != null && old == null)
+    // Replaced (new != null && old != null)
+    // Deleted (new == null && old != null)
+    void (*notify)(int shard, int64_t time, struct pogocache_entry *new_entry, 
+        struct pogocache_entry *old_entry, void *udata);
     void *udata;         // user data for above callbacks
     // functionality options
     bool usecas;         // enable the compare-and-store operation
@@ -168,8 +178,6 @@ struct pogocache_sweep_poll_opts {
     int pollsize;  // number of entries to poll (default: 20)
 };
 
-struct pogocache;
-
 // initialize/destroy
 struct pogocache *pogocache_new(struct pogocache_opts *opts);
 void pogocache_free(struct pogocache *cache);
@@ -206,5 +214,15 @@ size_t pogocache_size(struct pogocache *cache,
 // utilities
 int pogocache_nshards(struct pogocache *cache);
 int64_t pogocache_now(void);
+
+void pogocache_entry_retain(struct pogocache *cache,
+    struct pogocache_entry *entry);
+void pogocache_entry_release(struct pogocache *cache, 
+    struct pogocache_entry *entry);
+
+const void *pogocache_entry_key(struct pogocache *cache,
+    struct pogocache_entry *entry, size_t *keylen, char buf[128]);
+const void *pogocache_entry_value(struct pogocache *cache,
+    struct pogocache_entry *entry, size_t *valuelen);
 
 #endif

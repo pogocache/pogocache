@@ -247,15 +247,20 @@ static size_t setmaxrlimit(void) {
     return maxconns;
 }
 
-static void evicted(int shard, int reason, int64_t time, const void *key,
-    size_t keylen, const void *value, size_t valuelen, int64_t expires,
-    uint32_t flags, uint64_t cas, void *udata)
+static void notify(int shard, int64_t time, struct pogocache_entry *new_entry, 
+    struct pogocache_entry *old_entry, void *udata)
 {
-    (void)value, (void)valuelen, (void)expires, (void)udata;
+    (void)udata;
     return;
-    printf(". evicted shard=%d, reason=%d, time=%" PRIi64 ", key='%.*s'"
-        ", flags=%" PRIu32 ", cas=%" PRIu64 "\n",
-        shard, reason, time, (int)keylen, (char*)key, flags, cas);
+    char buf[128];
+    size_t keylen;
+    const char *key = pogocache_entry_key(cache, new_entry, &keylen, buf);
+    size_t valuelen;
+    const char *value = pogocache_entry_value(cache, new_entry, &valuelen);
+    printf(". notify shard=%d, time=%" PRIi64 ", new=%p, old=%p (%.*s %.*s)\n",
+        shard, time, new_entry, old_entry,
+        (int)keylen, key, (int)valuelen, value
+        );
 }
 
 #define BEGIN_FLAGS() \
@@ -730,11 +735,10 @@ int main(int argc, char *argv[]) {
         .nshards = nshards,
         .loadfactor = loadfactor,
         .usecas = usecasflag,
-        .evicted = evicted,
+        .notify = notify,
         .allowshrink = true,
         .usethreadbatch = true,
     };
-    // opts.yield = 0;
 
     cache = pogocache_new(&opts);
     if (!cache) {

@@ -32,7 +32,6 @@
 
 // #define NOSIXPACK
 // #define DBGCHECKENTRY
-// #define EVICTONITER
 // #define NO48BITPTRS
 
 #if INTPTR_MAX == INT64_MAX
@@ -288,6 +287,8 @@ struct pgctx {
     void (*evicted)(int shard, int reason, int64_t time, const void *key,
         size_t keylen, const void *val, size_t vallen, int64_t expires,
         uint32_t flags, uint64_t cas, void *udata);
+    void (*notify)(int shard, int64_t time, struct pogocache_entry *new_entry,
+        struct pogocache_entry *old_entry, void *udata);
     void *udata;
     bool usecas;
     bool nosixpack;
@@ -317,33 +318,33 @@ struct entry {
 };
 
 static size_t entry_memsize(const struct entry *entry) {
-    const uint8_t *p = entry->data;
     if (entry->memszsz == 0) {
-        return *p;
+        return *entry->data;
     }
     if (entry->memszsz == 1) {
         uint16_t x;
-        memcpy(&x, p, 2);
+        memcpy(&x, entry->data, 2);
         return x;
     }
     if (entry->memszsz == 2) {
         uint32_t x;
-        memcpy(&x, p, 4);
+        memcpy(&x, entry->data, 4);
         return x;
     }
     uint64_t x;
-    memcpy(&x, p, 8);
+    memcpy(&x, entry->data, 8);
     return x;
 }
 
 static int64_t entry_expires(const struct entry *entry) {
+    if (!entry->has_expires) {
+        return 0;
+    }
+    int64_t expires = 0;
     const uint8_t *p = entry->data;
     p += 1<<entry->memszsz;
-    int64_t x = 0;
-    if (entry->has_expires) {
-        memcpy(&x, p, 8);
-    }
-    return x;
+    memcpy(&expires, p, 8);
+    return expires;
 }
 
 static int64_t entry_time(struct entry *entry) {
@@ -354,53 +355,40 @@ static void entry_settime(struct entry *entry, int64_t time) {
     entry->time = time;
 }
 
-static int entry_alive_exp(int64_t expires, int64_t now) {
-    return expires > 0 && expires <= now ? POGOCACHE_REASON_EXPIRED : 0;
+static bool entry_alive_exp(int64_t expires, int64_t now) {
+    return expires == 0 || expires > now;
 }
 
-static int entry_alive(struct entry *entry, int64_t now) {
-    int64_t expires = entry_expires(entry);
-    return entry_alive_exp(expires, now);
+static bool entry_alive(struct entry *entry, int64_t now) {
+    return entry_alive_exp(entry_expires(entry), now);
 }
 
 static uint64_t entry_cas(const struct entry *entry, struct pgctx *ctx) {
     if (!ctx->usecas) {
         return 0;
     }
+    uint64_t cas = 0;
     const uint8_t *p = entry->data;
-    p += 1<<entry->memszsz;
-    if (entry->has_expires) {
-        p += 8;
-    }
-    if (entry->has_flags) {
-        p += 4;
-    }
-    uint64_t x = 0;
-    memcpy(&x, p, 8);
-    return x;
+    p += 1<<entry->memszsz;           // memsize
+    p += (entry->has_expires&1)<<3;   // expires
+    p += (entry->has_flags&1)<<2;     // flags
+    memcpy(&cas, p, 8);               // cas
+    return cas;
 }
 
 // returns the raw key. sixpack will be returned in it's raw format
 static const char *entry_rawkey(const struct entry *entry, size_t *keylen_out,
     struct pgctx *ctx)
 {
+    uint64_t keylen;
     const uint8_t *p = entry->data;
-    p += 1<<entry->memszsz;
-    if (entry->has_expires) {
-        p += 8; // expires
-    }
-    if (entry->has_flags) {
-        p += 4; // flags
-    }
-    if (ctx->usecas) {
-        p += 8; // cas
-    }
-    uint64_t x;
-    p += varint_read_u64(p, &x); // keylen
-    size_t keylen = x;
-    char *key = (char*)p;
+    p += 1<<entry->memszsz;           // memsize
+    p += (entry->has_expires&1)<<3;   // expires
+    p += (entry->has_flags&1)<<2;     // flags
+    p += (ctx->usecas&1)<<3;          // cas
+    p += varint_read_u64(p, &keylen); // keylen
     *keylen_out = keylen;
-    return key;
+    return (const char*)p;
 }
 
 // returns the key. If using sixpack make sure to copy the result asap.
@@ -415,6 +403,18 @@ static const char *entry_key(const struct entry *entry, size_t *keylen_out,
     }
     *keylen_out = keylen;
     return key;
+}
+
+// returns the value.
+static const char *entry_value(const struct entry *entry, size_t *vallen_out,
+    struct pgctx *ctx)
+{
+    size_t size = entry_memsize(entry);
+    size_t keylen;
+    const uint8_t *p = (uint8_t*)entry_rawkey(entry, &keylen, ctx);
+    p += keylen;
+    *vallen_out = size-(size_t)(p-(uint8_t*)entry);
+    return (const char*)p;
 }
 
 static bool entry_sixpacked(const struct entry *entry) {
@@ -622,6 +622,11 @@ static void entry_free(struct entry *entry, struct pgctx *ctx) {
     ctx->free(entry);
 }
 
+static struct entry *entry_clone(struct entry *entry) {
+    atomic_fetch_add(&entry->rc, 1);
+    return entry;
+}
+
 static int entry_compare(const struct entry *a, const struct entry *b,
     struct pgctx *ctx)
 {
@@ -806,32 +811,28 @@ static bool map_init(struct map *map, size_t cap, struct pgctx *ctx) {
     return true;
 }
 
-static bool resize(struct map *map, size_t new_cap, struct pgctx *ctx, 
-    bool forclear)
-{
+static bool resize(struct map *map, size_t new_cap, struct pgctx *ctx) {
     struct map map2;
     if (!map_init(&map2, new_cap, ctx)) {
         return false;
     }
-    if (!forclear) {
-        for (int i = 0; i < map->nbuckets; i++) {
-            struct bucket ebkt = map->buckets[i];
-            if (get_dib(&ebkt)) {
-                set_dib(&ebkt, 1);
-                size_t j = get_hash(&ebkt) & map2.mask;
-                while (1) {
-                    if (get_dib(&map2.buckets[j]) == 0) {
-                        map2.buckets[j] = ebkt;
-                        break;
-                    }
-                    if (get_dib(&map2.buckets[j]) < get_dib(&ebkt)) {
-                        struct bucket tmp = map2.buckets[j];
-                        map2.buckets[j] = ebkt;
-                        ebkt = tmp;
-                    }
-                    j = (j + 1) & map2.mask;
-                    set_dib(&ebkt, get_dib(&ebkt)+1);
+    for (int i = 0; i < map->nbuckets; i++) {
+        struct bucket ebkt = map->buckets[i];
+        if (get_dib(&ebkt)) {
+            set_dib(&ebkt, 1);
+            size_t j = get_hash(&ebkt) & map2.mask;
+            while (1) {
+                if (get_dib(&map2.buckets[j]) == 0) {
+                    map2.buckets[j] = ebkt;
+                    break;
                 }
+                if (get_dib(&map2.buckets[j]) < get_dib(&ebkt)) {
+                    struct bucket tmp = map2.buckets[j];
+                    map2.buckets[j] = ebkt;
+                    ebkt = tmp;
+                }
+                j = (j + 1) & map2.mask;
+                set_dib(&ebkt, get_dib(&ebkt)+1);
             }
         }
     }
@@ -853,7 +854,7 @@ static bool map_insert(struct map *map, struct entry *entry, uint32_t hash,
 {
     hash = clip_hash(hash);
     if (map->count >= map->growat) {
-        if (!resize(map, map->nbuckets*2, ctx, false)) {
+        if (!resize(map, map->nbuckets*2, ctx)) {
             *old = 0;
             return false;
         }
@@ -924,14 +925,6 @@ static int map_get_bucket(struct map *map, const char *key, size_t keylen,
     }
 }
 
-static struct entry *map_get_entry(struct map *map, const char *key,
-    size_t keylen, uint32_t hash, int *bkt_idx_out, struct pgctx *ctx)
-{
-    int i = map_get_bucket(map, key, keylen, hash, ctx);
-    *bkt_idx_out = i;
-    return i >= 0 ? get_entry(&map->buckets[i]) : 0;
-}
-
 // This deletes entry from bucket and adjusts the dibs buckets to right, if
 // needed.
 static void delbkt(struct map *map, size_t i) {
@@ -956,31 +949,25 @@ static bool needsshrink(struct map *map, struct pgctx *ctx) {
 
 // Try to shrink the hashmap. If needed, this will allocate a new hashmap that
 // has fewer buckets and move all existing entries into the smaller map.
-// The 'multi' param is a hint that multi entries may have been deleted, such
-// as with the iter or clear operations.
 // If the resize fails due to an allocation error then the existing hashmap
 // will be retained.
-static void tryshrink(struct map *map, bool multi, struct pgctx *ctx) {
+static void tryshrink(struct map *map, struct pgctx *ctx) {
     if (!needsshrink(map, ctx)) {
         return;
     }
-    int cap;
-    if (multi) {
-        // Determine how many buckets are needed to store all entries.
-        cap = map->cap;
-        int growat = cap * ctx->loadfactor;
-        while (map->count >= growat) {
-            cap *= 2;
-            growat = cap * ctx->loadfactor;
-        }
-    } else {
-        // Just half the buckets
-        cap = map->nbuckets / 2;
+    // Determine the capacity (minimum number of buckets) needed to store all 
+    // entries. The capactiry must be a power of two.
+    size_t count = map->count;
+    size_t cap = map->cap;
+    size_t growat = cap * ctx->loadfactor;
+    while (count >= growat) {
+        cap *= 2;
+        growat = cap * ctx->loadfactor;
     }
-    resize(map, cap, ctx, false);
+    resize(map, cap, ctx);
 }
 
-// delete an entry at bucket position. not called directly
+// Delete an entry at bucket position. Not called directly
 static struct entry *delentry_at_bkt(struct map *map, size_t i) {
     struct entry *old = get_entry(&map->buckets[i]);
     assert(old);
@@ -989,6 +976,9 @@ static struct entry *delentry_at_bkt(struct map *map, size_t i) {
     return old;
 }
 
+// Delete an entry from the map and return it, or return null if not found.
+// This operation will not shrink the map. Call tryshrink to explicitly
+// shrink the map after a successful delete.
 static struct entry *map_delete(struct map *map, const char *key,
     size_t keylen, uint32_t hash, struct pgctx *ctx)
 {
@@ -1005,8 +995,72 @@ static struct entry *map_delete(struct map *map, const char *key,
     }
 }
 
-static size_t evict_entry(struct shard *shard, int shardidx, 
-    struct entry *entry, int64_t now, int reason, struct pgctx *ctx)
+enum notify {
+    NOTIFY_INSERTED,
+    NOTIFY_DELETED,
+    NOTIFY_REPLACED,
+    NOTIFY_EXPIRED,
+    NOTIFY_CLEARED,
+    NOTIFY_LOWMEM,
+};
+
+static void notify(int shardidx, enum notify kind, struct entry *new, 
+    struct entry *old, int64_t now, struct pgctx *ctx)
+{
+    int evict_reason = 0;
+    switch (kind) {
+    case NOTIFY_INSERTED:
+        assert(new);
+        assert(!old);
+        break;
+    case NOTIFY_DELETED:
+        assert(!new);
+        assert(old);
+        break;
+    case NOTIFY_REPLACED:
+        assert(new);
+        assert(old);
+        break;
+    case NOTIFY_EXPIRED:
+        evict_reason = POGOCACHE_REASON_EXPIRED;
+        assert(!new);
+        assert(old);
+        break;
+    case NOTIFY_CLEARED:
+        evict_reason = POGOCACHE_REASON_CLEARED;
+        assert(!new);
+        assert(old);
+        break;
+    case NOTIFY_LOWMEM:
+        evict_reason = POGOCACHE_REASON_LOWMEM;
+        assert(!new);
+        assert(old);
+        break;
+    }
+    if (ctx->notify) {
+        // Notify user of data change.
+        ctx->notify(shardidx, now, (struct pogocache_entry*)new, 
+            (struct pogocache_entry*)old, ctx->udata);
+    }
+    if (ctx->evicted && evict_reason) {
+        // Notify user that the entry was evicted.
+        char buf[128];
+        size_t keylen;
+        const char *key;
+        const char *val;
+        size_t vallen;
+        int64_t expires = 0;
+        uint32_t flags = 0;
+        uint64_t cas = 0;
+        entry_extract(old, &key, &keylen, buf, &val, &vallen, &expires, 
+            &flags, &cas, ctx);
+        ctx->evicted(shardidx, evict_reason, now, key, keylen, val,
+            vallen, expires, flags, cas, ctx->udata);
+    }
+}
+
+static void evict_entry(struct shard *shard, int shardidx, struct entry *entry,
+    int64_t now, enum notify kind, struct pgctx *ctx)
 {
     char buf[128];
     size_t keylen;
@@ -1014,24 +1068,11 @@ static size_t evict_entry(struct shard *shard, int shardidx,
     uint32_t hash = th64(key, keylen, ctx->seed);
     struct entry *del = map_delete(&shard->map, key, keylen, hash, ctx);
     assert(del == entry);
-    if (ctx->evicted) {
-        // Notify user that an entry was evicted.
-        const char *val;
-        size_t vallen;
-        int64_t expires = 0;
-        uint32_t flags = 0;
-        uint64_t cas = 0;
-        entry_extract(entry, 0, 0, 0, &val, &vallen, &expires, &flags, &cas,
-            ctx);
-        ctx->evicted(shardidx, reason, now, key, keylen, val,
-            vallen, expires, flags, cas, ctx->udata);
-    }
-    size_t size = entry_memsize(entry);
+    notify(shardidx, kind, 0, entry, now, ctx);
     entry_free(entry, ctx);
-    return size;
 }
 
-// evict an entry using the 2-random algorithm.
+// Evict an entry using the 2-random algorithm.
 // Pick two random entries and delete the one with the oldest access time.
 // Do not evict the entry if it matches the provided hash.
 static void auto_evict_entry(struct shard *shard, int shardidx, uint32_t hash,
@@ -1044,18 +1085,14 @@ static void auto_evict_entry(struct shard *shard, int shardidx, uint32_t hash,
     for (int i = 1; i < map->nbuckets && count < 2; i++) {
         size_t j = (i+hash)&(map->nbuckets-1);
         struct bucket *bkt = &map->buckets[j];
-        if (get_dib(bkt) == 0) {
+        if (get_dib(bkt) == 0 || get_hash(bkt) == hash) {
             continue;
         }
         struct entry *entry = get_entry(bkt);
-        int reason = entry_alive(entry, now);
-        if (reason) {
-            // Entry has expired. Evict this one instead.
-            evict_entry(shard, shardidx, entry, now, reason, ctx);
+        if (!entry_alive(entry, now)) {
+            // Entry has expired. Evict this one and return immediately.
+            evict_entry(shard, shardidx, entry, now, NOTIFY_EXPIRED, ctx);
             return;
-        }
-        if (get_hash(bkt) == hash) {
-            continue;
         }
         entries[count++] = entry;
     }
@@ -1072,8 +1109,7 @@ static void auto_evict_entry(struct shard *shard, int shardidx, uint32_t hash,
     } else {
         return;
     }
-    evict_entry(shard, shardidx, entries[choose], now, POGOCACHE_REASON_LOWMEM,
-        ctx);
+    evict_entry(shard, shardidx, entries[choose], now, NOTIFY_LOWMEM, ctx);
 }
 
 static void shard_deinit(struct shard *shard, struct pgctx *ctx) {
@@ -1130,6 +1166,7 @@ static void opts_to_ctx(int nshards, struct pogocache_opts *opts,
     if (opts) {
         ctx->yield = opts->yield;
         ctx->evicted = opts->evicted;
+        ctx->notify = opts->notify;
         ctx->udata = opts->udata;
         ctx->usecas = opts->usecas;
         ctx->nosixpack = opts->nosixpack;
@@ -1348,15 +1385,11 @@ static int loadop(const void *key, size_t keylen,
     uint32_t flags;
     uint64_t cas;
     entry_extract(entry, 0, 0, 0, &val, &vallen, &expires, &flags, &cas, ctx);
-    int reason = entry_alive(entry, now);
-    if (reason) {
-        // Entry is no longer alive. Evict the entry and clear the bucket.
-        if (ctx->evicted) {
-            ctx->evicted(shardidx, reason, now, key, keylen, val, vallen,
-                expires, flags, cas, ctx->udata);
-        }
-        entry_free(entry, ctx);
+    if (!entry_alive_exp(expires, now)) {
+        // Entry is no longer alive. Delete from map and notify the user.
         delbkt(&shard->map, bidx);
+        notify(shardidx, NOTIFY_EXPIRED, 0, entry, now, ctx);
+        entry_free(entry, ctx);
         return POGOCACHE_NOTFOUND;
     }
     if (!opts->notouch) {
@@ -1377,6 +1410,7 @@ static int loadop(const void *key, size_t keylen,
             }
             entry_settime(entry2, now);
             set_entry(bkt, entry2);
+            notify(shardidx, NOTIFY_REPLACED, entry, entry2, now, ctx);
             entry_free(entry, ctx);
         }
     }
@@ -1414,18 +1448,12 @@ static int deleteop(const void *key, size_t keylen,
     int64_t expires;
     uint32_t flags;
     uint64_t cas;
-    int reason = entry_alive(entry, now);
-    if (reason) {
+    if (!entry_alive(entry, now)) {
         // Entry is no longer alive. It was already deleted from the map but
         // we still need to notify the user.
-        if (ctx->evicted) {
-            entry_extract(entry, 0, 0, 0, &val, &vallen, &expires, &flags, &cas,
-                ctx);
-            ctx->evicted(shardidx, reason, now, key, keylen, val, vallen,
-                expires, flags, cas, ctx->udata);
-        }
-        tryshrink(&shard->map, false, ctx);
+        notify(shardidx, NOTIFY_EXPIRED, 0, entry, now, ctx);
         entry_free(entry, ctx);
+        tryshrink(&shard->map, ctx);
         return POGOCACHE_NOTFOUND;
     }
     if (opts->entry) {
@@ -1440,14 +1468,15 @@ static int deleteop(const void *key, size_t keylen,
             // bucket.
             struct entry *old;
             bool ok = map_insert(&shard->map, entry, hash, &old, ctx);
-            assert(ok); (void)ok;
+            assert(ok);
             assert(!old);
             return POGOCACHE_CANCELED;
         }
     }
     // Entry was successfully deleted.
-    tryshrink(&shard->map, false, ctx);
+    notify(shardidx, NOTIFY_DELETED, 0, entry, now, ctx);
     entry_free(entry, ctx);
+    tryshrink(&shard->map, ctx);
     return POGOCACHE_DELETED;
 }
 
@@ -1480,12 +1509,10 @@ static int storeop(const void *key, size_t keylen, const void *val,
     if (opts->keepttl) {
         // User wants to keep the existing ttl. Get the existing entry from the
         // map first and take its expiration.
-        int i;
-        struct entry *old = map_get_entry(&shard->map, key, keylen, hash, &i, 
-            ctx);
-        if (old) {
-            int reason = entry_alive(old, now);
-            if (reason == 0) {
+        int bidx = map_get_bucket(&shard->map, key, keylen, hash, ctx);
+        if (bidx >= 0) {
+            struct entry *old = get_entry(&shard->map.buckets[bidx]);
+            if (entry_alive(old, now)) {
                 expires = entry_expires(old);
             }
         }
@@ -1506,21 +1533,10 @@ static int storeop(const void *key, size_t keylen, const void *val,
         goto nomem;
     }
     if (old) {
-        int reason = entry_alive(old, now);
-        if (reason) {
+        if (!entry_alive(old, now)) {
             // There's an old entry, but it's no longer alive.
-            // Treat this like an eviction and notify the user.
-            if (ctx->evicted) {
-                const char *oval;
-                size_t ovallen;
-                int64_t oexpires = 0;
-                uint32_t oflags = 0;
-                uint64_t ocas = 0;
-                entry_extract(old, 0, 0, 0,
-                    &oval, &ovallen, &oexpires, &oflags, &ocas, ctx);
-                ctx->evicted(shardidx, reason, now, key, keylen, oval, ovallen,
-                    oexpires, oflags, ocas, ctx->udata);
-            }
+            // Notify the user, as if the entry was evicted through expiration.
+            notify(shardidx, NOTIFY_EXPIRED, 0, entry, now, ctx);
             entry_free(old, ctx);
             old = 0;
         }
@@ -1552,7 +1568,7 @@ static int storeop(const void *key, size_t keylen, const void *val,
             // never be a new allocation.
             struct entry *e = 0;
             bool ok = map_insert(&shard->map, old, hash, &e, ctx);
-            assert(ok); (void)ok;
+            assert(ok);
             assert(e == entry);
             entry_free(entry, ctx);
             return put_back_status;
@@ -1561,7 +1577,7 @@ static int storeop(const void *key, size_t keylen, const void *val,
         // The new entry must not be inserted.
         // Delete it and return early.
         struct entry *e = map_delete(&shard->map, key, keylen, hash, ctx);
-        assert(e == entry); (void)e;
+        assert(e == entry);
         entry_free(entry, ctx);
         return POGOCACHE_NOTFOUND;
     }
@@ -1585,6 +1601,7 @@ static int storeop(const void *key, size_t keylen, const void *val,
     }
     // The new entry was inserted.
     if (old) {
+        notify(shardidx, NOTIFY_REPLACED, entry, old, now, ctx);
         entry_free(old, ctx);
         return POGOCACHE_REPLACED;
     } else {
@@ -1593,6 +1610,7 @@ static int storeop(const void *key, size_t keylen, const void *val,
             // a low memory event. Evict one entry.
             auto_evict_entry(shard, shardidx, hash, now, ctx);
         }
+        notify(shardidx, NOTIFY_INSERTED, entry, 0, now, ctx);
         return POGOCACHE_INSERTED;
     }
 nomem:
@@ -1618,7 +1636,6 @@ int pogocache_store(struct pogocache *cache, const void *key, size_t keylen,
     );
 }
 
-
 static struct pogocache *rootcache(struct pogocache *cache) {
     return cache->isbatch ? cache->batch.cache : cache;
 }
@@ -1640,47 +1657,42 @@ static int iterop(struct shard *shard, int shardidx, int64_t now,
             continue;
         }
         struct entry *entry = get_entry(bkt);
-        const char *key, *val;
-        size_t keylen, vallen;
-        int64_t expires;
-        uint32_t flags;
-        uint64_t cas;
-        entry_extract(entry, &key, &keylen, buf, &val, &vallen,
-            &expires, &flags, &cas, ctx);
-        int reason = entry_alive(entry, now);
-        if (reason) {
-#ifdef EVICTONITER
-            if (ctx->evicted) {
-                ctx->evicted(shardidx, reason, now, key, keylen, val, vallen,
-                    expires, flags, cas, ctx->udata);
-            }
-            // Delete entry at bucket.
+        if (!entry_alive(entry, now)) {
+            // Entry has expired
             delbkt(&shard->map, i);
+            notify(shardidx, NOTIFY_EXPIRED, 0, entry, now, ctx);
             entry_free(entry, ctx);
             i--;
-#endif
-        } else {
-            // Entry is alive, check with user for next action.
-            int action = POGOCACHE_ITER_CONTINUE;
-            if (opts->entry) {
-                action = opts->entry(shardidx, now, key, keylen, val,
-                    vallen, expires, flags, cas, opts->udata);
+            continue;
+        }
+        int action = POGOCACHE_ITER_CONTINUE;
+        if (opts->entry) {
+            // Check with user for next action.
+            const char *key, *val;
+            size_t keylen, vallen;
+            int64_t expires;
+            uint32_t flags;
+            uint64_t cas;
+            entry_extract(entry, &key, &keylen, buf, &val, &vallen,
+                &expires, &flags, &cas, ctx);
+            action = opts->entry(shardidx, now, key, keylen, val,
+                vallen, expires, flags, cas, opts->udata);
+        }
+        if (action != POGOCACHE_ITER_CONTINUE) {
+            if (action&POGOCACHE_ITER_DELETE) {
+                // Delete entry at bucket
+                delbkt(&shard->map, i);
+                notify(shardidx, NOTIFY_DELETED, 0, entry, now, ctx);
+                entry_free(entry, ctx);
+                i--;
             }
-            if (action != POGOCACHE_ITER_CONTINUE) {
-                if (action&POGOCACHE_ITER_DELETE) {
-                    // Delete entry at bucket
-                    delbkt(&shard->map, i);
-                    entry_free(entry, ctx);
-                    i--;
-                }
-                if (action&POGOCACHE_ITER_STOP) {
-                    status = POGOCACHE_CANCELED;
-                    break;
-                }
+            if (action&POGOCACHE_ITER_STOP) {
+                status = POGOCACHE_CANCELED;
+                break;
             }
         }
     }
-    tryshrink(&shard->map, true, ctx);
+    tryshrink(&shard->map, ctx);
     return status;
 }
 
@@ -1810,7 +1822,6 @@ size_t pogocache_size(struct pogocache *cache,
 static int sweepop(struct shard *shard, int shardidx, int64_t now,
     size_t *swept, size_t *kept, struct pgctx *ctx)
 {
-    char buf[128];
     for (int i = 0; i < shard->map.nbuckets; i++) {
         struct bucket *bkt = &shard->map.buckets[i];
         if (get_dib(bkt) == 0) {
@@ -1818,26 +1829,14 @@ static int sweepop(struct shard *shard, int shardidx, int64_t now,
         }
         struct entry *entry = get_entry(bkt);
         int64_t expires = entry_expires(entry);
-        int reason = entry_alive_exp(expires, now);
-        if (reason == 0) {
+        if (entry_alive_exp(expires, now)) {
             // entry is still alive
             (*kept)++;
             continue;
         }
         // entry is no longer alive.
-        if (ctx->evicted) {
-            const char *key, *val;
-            size_t keylen, vallen;
-            int64_t expires;
-            uint32_t flags;
-            uint64_t cas;
-            entry_extract(entry, &key, &keylen, buf, &val, &vallen, &expires,
-                &flags, &cas, ctx);
-            // Report eviction to user
-            ctx->evicted(shardidx, reason, now, key, keylen, val, vallen,
-                expires, flags, cas, ctx->udata);
-        }
         delbkt(&shard->map, i);
+        notify(shardidx, NOTIFY_EXPIRED, 0, entry, now, ctx);
         entry_free(entry, ctx);
         (*swept)++;
         // Entry was deleted from bucket, which may move entries to the right
@@ -1845,7 +1844,7 @@ static int sweepop(struct shard *shard, int shardidx, int64_t now,
         // again.
         i--;
     }
-    tryshrink(&shard->map, true, ctx);
+    tryshrink(&shard->map, ctx);
     return 0;
 }
 
@@ -1890,29 +1889,15 @@ static int clearop(struct shard *shard, int shardidx, int64_t now,
     struct pgctx *ctx, struct bucket **buckets, int *nbuckets, bool deferfree)
 {
     // loop over entries for callbacks
-    char buf[128];
     for (int i = 0; i < shard->map.nbuckets; i++) {
         struct bucket *bkt = &shard->map.buckets[i];
         if (get_dib(bkt) == 0) {
             continue;
         }
         struct entry *entry = get_entry(bkt);
-        if (ctx->evicted) {
-            const char *key, *val;
-            size_t keylen, vallen;
-            int64_t expires;
-            uint32_t flags;
-            uint64_t cas;
-            entry_extract(entry, &key, &keylen, buf, &val, &vallen, 
-                &expires, &flags, &cas, ctx);
-            int reason = entry_alive_exp(expires, now);
-            if (reason == 0) {
-                reason = POGOCACHE_REASON_CLEARED;
-            }
-            // Report eviction to user
-            ctx->evicted(shardidx, reason, now, key, keylen, val, vallen,
-                expires, flags, cas, ctx->udata);
-        }
+        enum notify kind = entry_alive(entry, now) ? NOTIFY_CLEARED :
+            NOTIFY_EXPIRED;
+        notify(shardidx, kind, 0, entry, now, ctx);
         if (!deferfree) {
             entry_free(entry, ctx);
         }
@@ -2002,7 +1987,7 @@ static int sweeppollop(struct shard *shard, int shardidx, int64_t now,
         }
         struct entry *entry = get_entry(bkt);
         count++;
-        dead += (entry_alive(entry, now) != 0);
+        dead += !entry_alive(entry, now);
     }
     if (count == 0) {
         *percent = 0;
@@ -2027,4 +2012,50 @@ double pogocache_sweep_poll(struct pogocache *cache,
         sweeppollop(shard, shardidx, now, pollsize, &percent);
     );
     return percent;
+}
+
+void pogocache_entry_retain(struct pogocache *cache, 
+    struct pogocache_entry *entry)
+{
+    (void)cache;
+    if (entry) {
+        entry_clone((struct entry*)entry);
+    }
+}
+
+void pogocache_entry_release(struct pogocache *cache, 
+    struct pogocache_entry *entry)
+{
+    if (entry) {
+        entry_free((struct entry*)entry, &cache->ctx);
+    }
+}
+
+const void *pogocache_entry_key(struct pogocache *cache,
+    struct pogocache_entry *entry, size_t *keylen, char buf[128])
+{
+    assert(buf);
+    const void *key = 0;
+    size_t keylen0 = 0;
+    if (entry) {
+        key = entry_key((struct entry*)entry, &keylen0, buf, &cache->ctx);
+    }
+    if (keylen) {
+        *keylen = keylen0;
+    }
+    return key;
+}
+
+const void *pogocache_entry_value(struct pogocache *cache,
+    struct pogocache_entry *entry, size_t *valuelen)
+{
+    const void *value = 0;
+    size_t valuelen0 = 0;
+    if (entry) {
+        value = entry_value((struct entry*)entry, &valuelen0, &cache->ctx);
+    }
+    if (valuelen) {
+        *valuelen = valuelen0;
+    }
+    return value;
 }
