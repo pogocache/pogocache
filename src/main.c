@@ -437,11 +437,6 @@ static void listening(void *udata) {
     atomic_store(&loaded, true);
 }
 
-static void yield(void *udata) {
-    (void)udata;
-    sched_yield();
-}
-
 int main(int argc, char *argv[]) {
     procstart = sys_now();
 
@@ -728,7 +723,6 @@ int main(int argc, char *argv[]) {
     }
 
     struct pogocache_opts opts = {
-        .yield = yield,
         .seed = seed,
         .malloc = xmalloc,
         .free = xfree,

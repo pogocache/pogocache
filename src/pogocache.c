@@ -46,6 +46,14 @@
 #error Unknown pointer size
 #endif
 
+#if defined(__x86_64__) || defined(__i386__)
+#define cpu_yield() __builtin_ia32_pause()
+#elif defined(__aarch64__) || defined(__arm__)
+#define cpu_yield() __asm__ __volatile__("yield")
+#else
+#define cpu_yield()
+#endif
+
 static struct pogocache_count_opts defcountopts = { 0 };
 static struct pogocache_total_opts deftotalopts = { 0 };
 static struct pogocache_size_opts defsizeopts = { 0 };
@@ -1278,6 +1286,8 @@ static void lock(struct batch *batch, struct shard *shard, struct pgctx *ctx) {
             }
             if (ctx->yield) {
                 ctx->yield(ctx->udata);
+            } else {
+                cpu_yield();
             }
         }
     } else {
@@ -1290,6 +1300,8 @@ static void lock(struct batch *batch, struct shard *shard, struct pgctx *ctx) {
             }
             if (ctx->yield) {
                 ctx->yield(ctx->udata);
+            } else {
+                cpu_yield();
             }
         }
     }
