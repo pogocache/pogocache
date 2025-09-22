@@ -421,7 +421,7 @@ static const char *entry_value(const struct entry *entry, size_t *vallen_out,
     size_t keylen;
     const uint8_t *p = (uint8_t*)entry_rawkey(entry, &keylen, ctx);
     p += keylen;
-    *vallen_out = size-(size_t)(p-(uint8_t*)entry);
+    *vallen_out = size-(p-entry->data)-sizeof(struct entry);
     return (const char*)p;
 }
 
@@ -619,6 +619,17 @@ static struct entry *entry_new(const char *key, size_t keylen, const char *val,
     assert(memcmp(val2, oval, ovallen) == 0);
     // printf("%zu\n", size);
     assert(entry_memsize(entry_out) == size);
+
+    key2 = entry_key(entry, &keylen2, buf1, ctx);
+    assert(keylen2 == okeylen);
+    assert(memcmp(key2, okey, okeylen) == 0);
+    const char *val3;
+    size_t vallen3;
+    val3 = entry_value(entry, &vallen3, ctx);
+    assert(val3 == val2);
+    assert(vallen3 == ovallen);
+    assert(memcmp(val3, oval, ovallen) == 0);
+
 #endif
     return entry_out;
 }
