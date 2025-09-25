@@ -253,6 +253,7 @@ struct net_conn {
     char *out;
     size_t outlen;
     size_t outcap;
+    char *addr;
     struct bgworkctx *bgctx;
     struct qthreadctx *ctx;
     unsigned stat_cmd_get;
@@ -271,9 +272,8 @@ static struct net_conn *conn_new(int fd, struct qthreadctx *ctx) {
 
 static void conn_free(struct net_conn *conn) {
     if (conn) {
-        if (conn->out) {
-            xfree(conn->out);
-        }
+        xfree(conn->out);
+        xfree(conn->addr);
         xfree(conn);
     }
 }
@@ -1335,14 +1335,19 @@ ssize_t net_conn_write(struct net_conn *conn, const char *bytes, size_t nbytes){
 }
 
 
+// returns address for net_conn, allocates a new 
 const char *net_conn_addr(struct net_conn *conn) {
-    static __thread char addrstr[512];
+    if (conn->addr) {
+        return conn->addr;
+    }
+    char addrstr[512];
     struct sockaddr_storage addr;
     socklen_t addr_len = sizeof(addr);
     if (getpeername(conn->fd, (struct sockaddr *)&addr, &addr_len) == -1) {
-        return "";
+        strcpy(addrstr, "");
+        goto done;
     }
-    static char ipstr[INET6_ADDRSTRLEN];
+    char ipstr[INET6_ADDRSTRLEN];
     int port;
     if (addr.ss_family == AF_INET) {
         struct sockaddr_in *s = (struct sockaddr_in *)&addr;
@@ -1353,10 +1358,17 @@ const char *net_conn_addr(struct net_conn *conn) {
         inet_ntop(AF_INET6, &s->sin6_addr, ipstr, sizeof(ipstr));
         port = ntohs(s->sin6_port);
     } else if (addr.ss_family == AF_UNIX) {
-        return "unixsocket";
+        strcpy(addrstr, "unixsocket");
+        goto done;
     } else {
-        return "";
+        strcpy(addrstr, "");
+        goto done;
     }
     snprintf(addrstr, sizeof(addrstr), "%s:%d", ipstr, port);
-    return addrstr;
+done:
+    (void)0;
+    size_t len = strlen(addrstr);
+    conn->addr = xmalloc(len+1);
+    memcpy(conn->addr, addrstr, len+1);
+    return conn->addr;
 }
