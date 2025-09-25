@@ -14,10 +14,20 @@ OUTEXT=.html
 endif
 
 ifndef CNODEFFLAGS
-ifdef CCSANI
+ifdef CCSANI 
+CCASAN=1
+endif
+ifdef CCASAN
 SFLAGS := -O0 -g3 -Wall -Wextra -Werror -fsanitize=address 
+endif
+ifdef CCTSAN 
+SFLAGS := -O0 -g3 -Wall -Wextra -Werror -fsanitize=thread 
+endif
+ifneq ($(or $(CCASAN),$(CCTSAN)),)
 SFLAGS += -fno-omit-frame-pointer -DCCSANI
 CFLAGS := $(SFLAGS) $(CFLAGS)
+NOJEMALLOC := 1
+NOMIMALLOC := 1
 else
 CFLAGS := -Wall -Wextra -Werror -g -O3 -flto=auto $(CFLAGS)
 endif
