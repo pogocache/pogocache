@@ -247,22 +247,6 @@ static size_t setmaxrlimit(void) {
     return maxconns;
 }
 
-static void notify(int shard, int64_t time, struct pogocache_entry *new_entry, 
-    struct pogocache_entry *old_entry, void *udata)
-{
-    (void)udata;
-    return;
-    char buf[128];
-    size_t keylen;
-    const char *key = pogocache_entry_key(cache, new_entry, &keylen, buf);
-    size_t valuelen;
-    const char *value = pogocache_entry_value(cache, new_entry, &valuelen);
-    printf(". notify shard=%d, time=%" PRIi64 ", new=%p, old=%p (%.*s %.*s)\n",
-        shard, time, new_entry, old_entry,
-        (int)keylen, key, (int)valuelen, value
-        );
-}
-
 #define BEGIN_FLAGS() \
     if (0) {
 #define BFLAG(opt, op) \
@@ -729,7 +713,6 @@ int main(int argc, char *argv[]) {
         .nshards = nshards,
         .loadfactor = loadfactor,
         .usecas = usecasflag,
-        .notify = notify,
         .allowshrink = true,
         .usethreadbatch = true,
     };
