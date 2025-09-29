@@ -2091,6 +2091,23 @@ static void cmdSTATS(struct conn *conn, struct args *args) {
     return;
 }
 
+static void cmdVERSION(struct conn *conn, struct args *args) {
+    (void)args;
+    if (conn_proto(conn) == PROTO_MEMCACHE) {
+        conn_write_raw_cstr(conn, "VERSION ");
+        conn_write_raw_cstr(conn, version);
+        conn_write_raw_cstr(conn, "\n");
+    } else if (conn_proto(conn) == PROTO_POSTGRES) {
+        pg_write_row_desc(conn, (const char*[]){ "version" }, 1);
+            pg_write_row_data(conn, (const char*[]){ version },
+                (size_t[]){ strlen(version) }, 1);
+        pg_write_completef(conn, "VERSION 1");
+        pg_write_ready(conn, 'I');
+    } else {
+        conn_write_string(conn, version);
+    }
+}
+
 // Commands hash table. Lazy loaded per thread.
 // Simple open addressing using case-insensitive fnv1a hashes.
 static int nbuckets;
@@ -2139,6 +2156,7 @@ static struct cmd cmds[] = {
     { "save",      cmdSAVELOAD }, // pg
     { "load",      cmdSAVELOAD }, // pg
     { "stats",     cmdSTATS    }, // pg memcache style stats
+    { "version",   cmdVERSION  }, // pg
 };
 
 static void build_commands_table(void) {
@@ -2201,11 +2219,10 @@ void evcommand(struct conn *conn, struct args *args) {
     }
     if (verb >= 3) {
         if (!argeq(args, 0, "auth")) {
-            printf(". ");
             args_print(args);
         }
     }
-    
+
     struct cmd *cmd = get_cmd(args->bufs[0].data, args->bufs[0].len);
     if (cmd) {
         monitor_cmd(sys_unixnow(), 0, conn_addr(conn), args);
