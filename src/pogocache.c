@@ -1749,6 +1749,64 @@ int pogocache_iter(struct pogocache *cache, struct pogocache_iter_opts *opts) {
     return POGOCACHE_FINISHED;
 }
 
+static struct pogocache_entry *entryiter(struct shard *shard, int64_t now,
+    int shardidx, int *iter, struct pgctx *ctx)
+{
+    for (int i = *iter; i < shard->map.nbuckets; i++) {
+        struct bucket *bkt = &shard->map.buckets[i];
+        if (get_dib(bkt) == 0) {
+            continue;
+        }
+        struct entry *entry = get_entry(bkt);
+        if (!entry_alive(entry, now)) {
+            // Entry has expired
+            delbkt(&shard->map, i);
+            notify(shardidx, NOTIFY_EXPIRED, 0, entry, now, ctx);
+            entry_free(entry, ctx);
+            i--;
+            continue;
+        }
+        *iter = i+1;
+        pogocache_entry_retain(0, (void*)entry);
+        return (void*)entry;
+    }
+    *iter = 0;
+    return 0;
+}
+
+struct pogocache_entry *pogocache_entry_iter(struct pogocache *cache,
+    int64_t time, uint64_t *cursor)
+{
+    assert(cursor);
+    int64_t now = time > 0 ? time : getnow();
+    int shardidx = (*cursor)>>32;
+    if (shardidx < 0 || shardidx > cache->ctx.nshards) {
+        goto notfound;
+    }
+    int iter = (*cursor)&0xFFFFFFFF;
+    if (iter < 0) {
+        goto notfound;
+    }
+    struct pogocache_entry *entry = 0;
+    while (1) {
+        entry = ACQUIRE_FOR_SCAN_AND_EXECUTE(struct pogocache_entry*, shardidx,
+            entryiter(shard, now, shardidx, &iter, ctx);
+        );
+        if (entry) {
+            *cursor = (((uint64_t)shardidx)<<32)|(uint64_t)iter;
+            return entry;
+        }
+        shardidx++;
+        iter = 0;
+        if (shardidx == cache->ctx.nshards) {
+            goto notfound;
+        }
+    }
+notfound:
+    *cursor = 0;
+    return 0;
+}
+
 static size_t countop(struct shard *shard) {
     return shard->map.count;
 }

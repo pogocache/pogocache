@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <sched.h>
 #include "args.h"
 
 #define NANOSECOND  INT64_C(1)
@@ -31,6 +32,9 @@ bool argi64(struct args *args, int idx, int64_t *x);
 bool argu64(struct args *args, int idx, uint64_t *x);
 bool argeq(struct args *args, int idx, const char *cstr);
 bool argeq_bytes(const void *data, size_t strlen, const char *cstr);
+char *arg_cstr(struct args *args, size_t idx);
+char *cstr_copy(const char *cstr);
+
 int varint_write_u64(void *data, uint64_t x);
 int varint_read_u64(const void *data, size_t len, uint64_t *x);
 int varint_write_i64(void *data, int64_t x);
@@ -68,5 +72,16 @@ void binprint(const void *bin, size_t len);
 void *load_ptr(const uint8_t data[PTRSIZE]);
 void store_ptr(uint8_t data[PTRSIZE], void *ptr);
 uint8_t morris_incr(uint8_t morris, uint64_t rand);
+
+bool match(const char *pat, size_t plen, const char *str, size_t slen,
+    int depth);
+
+#if defined(__x86_64__) || defined(__i386__)
+#define cpu_yield() __builtin_ia32_pause()
+#elif defined(__aarch64__) || defined(__arm__)
+#define cpu_yield() __asm__ __volatile__("yield")
+#else
+#define cpu_yield() sched_yield()
+#endif
 
 #endif

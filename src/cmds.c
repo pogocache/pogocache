@@ -507,37 +507,6 @@ static void keys_ctx_free(struct keys_ctx *ctx) {
     xfree(ctx);
 }
 
-// pattern matcher
-// see https://github.com/tidwall/match.c
-static bool match(const char *pat, size_t plen, const char *str, size_t slen,
-    int depth)
-{
-    if (depth == 128) {
-        return false;
-    }
-    while (plen > 0) {
-        if (pat[0] == '\\') {
-            if (plen == 1) return false;
-            pat++; plen--; 
-        } else if (pat[0] == '*') {
-            if (plen == 1) return true;
-            if (pat[1] == '*') {
-                pat++; plen--;
-                continue;
-            }
-            if (match(pat+1, plen-1, str, slen, depth+1)) return true;
-            if (slen == 0) return false;
-            str++; slen--;
-            continue;
-        }
-        if (slen == 0) return false;
-        if (pat[0] != '?' && str[0] != pat[0]) return false;
-        pat++; plen--;
-        str++; slen--;
-    }
-    return slen == 0 && plen == 0;
-}
-
 static int keys_entry(int shard, int64_t time, const void *key, size_t keylen,
         const void *value, size_t valuelen, int64_t expires, uint32_t flags,
         uint64_t cas, void *udata)
@@ -2108,6 +2077,153 @@ static void cmdVERSION(struct conn *conn, struct args *args) {
     }
 }
 
+struct scan_ctx {
+    char *pattern;
+    size_t plen;
+    int64_t now;
+    size_t count;
+    uint64_t cursor;
+    struct pogocache_entry **entries;
+    size_t len;
+    size_t cap;
+};
+
+static void scan_ctx_free(struct scan_ctx *ctx) {
+    if (ctx) {
+        xfree(ctx->entries);
+        xfree(ctx->pattern);
+        xfree(ctx);
+    }
+}
+
+static void bgscan_work(void *udata) {
+    struct scan_ctx *ctx = udata;
+    while (ctx->len < ctx->count) {
+        struct pogocache_entry *entry;
+        entry = pogocache_entry_iter(cache, ctx->now, &ctx->cursor);
+        if (!entry) {
+            break;
+        }
+        char buf[128];
+        size_t keylen;
+        const void *key = pogocache_entry_key(cache, entry, &keylen, buf);
+        if (match(ctx->pattern, ctx->plen, key, keylen, 0)) {
+            if (ctx->len == ctx->cap) {
+                ctx->cap = ctx->cap ? ctx->cap * 2 : 16;
+                ctx->entries = xrealloc(ctx->entries, sizeof(void*)*ctx->cap);
+            }
+            ctx->entries[ctx->len++] = entry;
+        } else {
+            pogocache_entry_release(cache, entry);
+        }
+    }
+}
+
+static void bgscan_done(struct conn *conn, void *udata) {
+    struct scan_ctx *ctx = udata;
+    int proto = conn_proto(conn);
+    char scursor[32];
+    size_t clen = snprintf(scursor, sizeof(scursor), "%" PRIu64, ctx->cursor);
+    if (proto == PROTO_POSTGRES) {
+        pg_write_row_desc(conn, (const char*[]){ "key", "cursor" }, 2);
+    } else {
+        conn_write_array(conn, 2);
+        conn_write_bulk_cstr(conn, scursor);
+        conn_write_array(conn, ctx->len);
+    }
+    for (size_t i = 0; i < ctx->len; i++) {
+        struct pogocache_entry *entry = ctx->entries[i];
+        char buf[128];
+        size_t keylen;
+        const void *key = pogocache_entry_key(cache, entry, &keylen, buf);
+        if (proto == PROTO_POSTGRES) {
+            pg_write_row_data(conn, (const char*[]){ key, scursor },
+                (size_t[]){ keylen, clen }, 2);
+        } else {
+            conn_write_bulk(conn, key, keylen);
+        }
+        pogocache_entry_release(cache, entry);
+    }
+    if (proto == PROTO_POSTGRES) {
+        pg_write_completef(conn, "SCAN %zu", ctx->len);
+        pg_write_ready(conn, 'I');
+    }
+    scan_ctx_free(ctx);
+}
+
+// SCAN cursor [MATCH pattern] [COUNT count] [TYPE type]
+static void cmdSCAN(struct conn *conn, struct args *args) {
+    if (args->len < 2) {
+        conn_write_error(conn, ERR_WRONG_NUM_ARGS);
+        return;
+    }
+    size_t count = 100;
+    const char *stype = "string";
+    const void *pattern = "*";
+    size_t plen = 1;
+    uint64_t cursor;
+    if (!argu64(args, 1, &cursor)) {
+        conn_write_error(conn, "ERR invalid cursor");
+        return;
+    }
+    for (size_t i = 2; i < args->len; i++) {
+        if (argeq(args, i, "match")) {
+            i++;
+            if (i == args->len) {
+                goto err_syntax;
+            }
+            pattern = args->bufs[i].data;
+            plen = args->bufs[i].len;
+        } else if (argeq(args, i, "count")) {
+            i++;
+            if (i == args->len) {
+                goto err_syntax;
+            }
+            uint64_t x;
+            if (!argu64(args, i, &x) || x == 0 || x > INT32_MAX) {
+                goto err_syntax;
+            }
+            count = x;
+        } else if (argeq(args, i, "type")) {
+            i++;
+            if (i == args->len) {
+                goto err_syntax;
+            }
+            if (argeq(args, i, "string")) {
+                stype = "string";
+            } else {
+                char str[128];
+                snprintf(str, sizeof(str), "ERR unknown type name '%.*s'",
+                    (int)args->bufs[i].len, args->bufs[i].data);
+                conn_write_error(conn, str);
+                return;
+            }
+        } else {
+            goto err_syntax;
+        }
+    }
+    (void)stype;
+    int64_t now = sys_now();
+    struct scan_ctx *ctx = xmalloc(sizeof(struct scan_ctx));
+    memset(ctx, 0, sizeof(struct scan_ctx));
+    ctx->pattern = xmalloc(plen+1);
+    memcpy(ctx->pattern, pattern, plen);
+    ctx->pattern[plen] = '\0';
+    ctx->plen = plen;
+    ctx->count = count;
+    ctx->now = now;
+    ctx->cursor = cursor;
+    if (!conn_bgwork(conn, bgscan_work, bgscan_done, ctx)) {
+        conn_write_error(conn, "ERR failed to do work");
+        scan_ctx_free(ctx);
+    }
+    return;
+err_syntax:
+    conn_write_error(conn, ERR_SYNTAX_ERROR);
+    return;
+}
+
+
 // Commands hash table. Lazy loaded per thread.
 // Simple open addressing using case-insensitive fnv1a hashes.
 static int nbuckets;
@@ -2157,6 +2273,7 @@ static struct cmd cmds[] = {
     { "load",      cmdSAVELOAD }, // pg
     { "stats",     cmdSTATS    }, // pg memcache style stats
     { "version",   cmdVERSION  }, // pg
+    { "scan",      cmdSCAN     }, // pg
 };
 
 static void build_commands_table(void) {

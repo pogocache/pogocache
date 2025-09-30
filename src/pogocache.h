@@ -225,4 +225,7 @@ const void *pogocache_entry_key(struct pogocache *cache,
 const void *pogocache_entry_value(struct pogocache *cache,
     struct pogocache_entry *entry, size_t *valuelen);
 
+struct pogocache_entry *pogocache_entry_iter(struct pogocache *cache,
+    int64_t time, uint64_t *cursor);
+
 #endif
