@@ -1,6 +1,8 @@
 ifeq ($(CC), emcc)
 NOURING := 1
 NOOPENSSL := 1
+NOMIMALLOC := 1
+NOJEMALLOC := 1
 CFLAGS := -Wall -Wextra -Werror -O3 $(CFLAGS)
 LDFLAGS := -sASSERTIONS=1 -sINITIAL_MEMORY=64MB \
     -sEXPORTED_FUNCTIONS='["_malloc","_free","_exec_command","_add_time","_main"]' \
@@ -86,11 +88,14 @@ CFLAGS += -I../deps/openssl/include
 endif
 endif
 
+MUSL := $(shell ldd --version 2>&1 | head -n1 | grep -o musl || true)
 ifndef NOSTATIC
-LIBC := $(shell ldd --version 2>&1 | head -n1 | grep -o musl || true)
-ifeq ($(LIBC),musl)
+ifeq ($(MUSL),musl)
 CFLAGS += -static
 endif
+endif
+ifeq ($(MUSL),musl)
+CFLAGS += -D__MUSL__
 endif
 
 all: ../pogocache

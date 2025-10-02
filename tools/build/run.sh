@@ -4,16 +4,16 @@ set -e
 cd $(dirname "${BASH_SOURCE[0]}")
 wd=$(pwd)
 
-if [[ "$1" == "linux-aarch64" ]]; then
+if [[ "$1" == "linux-arm64-musl" ]]; then
     platform="linux/arm64"
     libc="musl"
 elif [[ "$1" == "linux-arm64" ]]; then
     platform="linux/arm64"
     libc="glibc"
-elif [[ "$1" == "linux-amd64" ]]; then
+elif [[ "$1" == "linux-amd64-musl" ]]; then
     platform="linux/amd64"
     libc="musl"
-elif [[ "$1" == "linux-x86_64" ]]; then
+elif [[ "$1" == "linux-amd64" ]]; then
     platform="linux/amd64"
     libc="glibc"
 elif [[ "$1" == "apple-arm64" ]]; then
@@ -23,11 +23,11 @@ else
     echo "Usage: $0 <arch>"
     echo ""
     echo "Valid architectures:"
-    echo "   linux-aarch64 -- musl"
-    echo "   linux-amd64   -- musl"
-    echo "   linux-arm64   -- glibc" 
-    echo "   linux-x86_64  -- glibc"
-    echo "   apple-arm64   -- Apple Silicon"
+    echo "   linux-arm64-musl -- musl"
+    echo "   linux-amd64-musl -- musl"
+    echo "   linux-arm64      -- glibc" 
+    echo "   linux-amd64      -- glibc"
+    echo "   apple-arm64      -- Apple Silicon"
     echo ""
     exit 1
 fi
@@ -58,7 +58,7 @@ make gitinfo
 tar -czf repo.tar.gz deps/ src/
 cd $wd
 mv ../../repo.tar.gz .
-reposha=$(tar -O -xf repo.tar.gz | sha1sum --quiet)
+reposha=$(tar -O -xf repo.tar.gz | sha1sum | awk '{print $1;}')
 
 build=1
 if [[ -f "../../packages/$name.tar.gz" ]]; then
