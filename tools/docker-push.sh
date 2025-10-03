@@ -9,15 +9,17 @@ help() {
   echo "Options:"
   echo "   --local    run locally, not CI. Uses local Docker login."
   echo "   --force    force build and push from any branch"
+  echo "   --nopush   do not push (dryrun)"
   echo ""
 }
 
 oforce=0
-olocal=0
+onopush=0
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -f|--force) oforce=1 ;;
         -l|--local) olocal=1 ;;
+        -n|--nopush) onopush=1 ;;
         --help) help; exit 0 ;;
         *) echo "Unknown parameter passed: $1"
            echo "Run '$0 --help' for more information"
@@ -83,25 +85,30 @@ build() {
   rm -rf pogocache*
   tar -xzf ../packages/pogocache-linux-$1.tar.gz
   mv pogocache-linux-$1/pogocache pogocache
-  docker build --platform linux/$2 . -t pogocache/pogocache:$1
+  docker build --platform linux/$2 . -t pogocache/pogocache:$2
   rm -rf pogocache*
 }
 
 # Build local images
-build aarch64 arm64
-build amd64 amd64
+build arm64-musl arm64
+build amd64-musl amd64
+
+if [[ "$onopush" == "1" ]]; then
+  echo "User provided --nopush, exit now"
+  exit
+fi
 
 # Push to docker
-docker push pogocache/pogocache:aarch64
+docker push pogocache/pogocache:arm64
 docker push pogocache/pogocache:amd64
 
 # Create a combined manifest
 create_manifest() {
   docker manifest create pogocache/pogocache:$1 \
-    --amend pogocache/pogocache:aarch64 \
+    --amend pogocache/pogocache:arm64 \
     --amend pogocache/pogocache:amd64
   docker manifest annotate pogocache/pogocache:$1 \
-      pogocache/pogocache:aarch64 --os linux --arch arm64
+      pogocache/pogocache:arm64 --os linux --arch arm64
   docker manifest annotate pogocache/pogocache:$1 \
       pogocache/pogocache:amd64 --os linux --arch amd64
 }
@@ -128,9 +135,9 @@ else
 fi
 
 if [ "$DOCKER_TOKEN" == "" ]; then
-  echo "The remote tags 'aarch64' and 'amd64' must be manually deleted"
+  echo "The remote tags 'arm64' and 'amd64' must be manually deleted"
 else
-  echo "Deleting remote tags 'aarch64' and 'amd64'"
-  curl -H "Authorization: JWT $DOCKER_TOKEN" -X DELETE $rurl/tags/aarch64
+  echo "Deleting remote tags 'arm64' and 'amd64'"
+  curl -H "Authorization: JWT $DOCKER_TOKEN" -X DELETE $rurl/tags/arm64
   curl -H "Authorization: JWT $DOCKER_TOKEN" -X DELETE $rurl/tags/amd64
 fi

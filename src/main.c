@@ -724,9 +724,10 @@ int main(int argc, char *argv[]) {
     }
 
     // Print the program details
-    printf("* Pogocache (pid: %d, arch: %s%s, version: %s, git: %s)\n",
-        getpid(), sys_arch(), sizeof(uintptr_t)==4?", mode: 32-bit":"", version,
-        githash);
+    printf("* Pogocache (pid: %d, version: %s, git: %s)\n", getpid(), 
+        version, githash);
+    printf("* Arch (arch: %s%s, libc: %s, os: %s)\n", sys_arch(), 
+        sizeof(uintptr_t)==4?", mode: 32-bit":"", sys_libc(), sys_os());
     char buf0[64], buf1[64];
     char buf2[64];
     if (memlimit < SIZE_MAX) {
