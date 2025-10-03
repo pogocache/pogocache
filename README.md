@@ -93,7 +93,7 @@ host address.
 Run Pogocache using the latest Docker image.
 
 ```sh
-docker run --net=host pogocache/pogocache
+docker run pogocache/pogocache
 ```
 
 <details>

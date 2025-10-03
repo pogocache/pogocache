@@ -5,4 +5,4 @@ if [ "${1#-}" != "$1" ] || [ "${1%.conf}" != "$1" ]; then
 	set -- pogocache "$@"
 fi
 
-exec "$@" $POGOCACHE_EXTRA_FLAGS
+exec "$@" -h 0.0.0.0 $POGOCACHE_EXTRA_FLAGS
