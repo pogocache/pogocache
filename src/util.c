@@ -270,6 +270,7 @@ ssize_t read_full(int fd, void *data, size_t len) {
 size_t u64toa(uint64_t x, uint8_t *data) {
     if (x < 10) {
         data[0] = '0'+x;
+        data[1] = '\0';
         return 1;
     }
     size_t i = 0;
@@ -282,13 +283,14 @@ size_t u64toa(uint64_t x, uint8_t *data) {
         data[j] = data[k];
         data[k] = ch;
     }
+    data[i] = '\0';
     return i;
 }
 
 size_t i64toa(int64_t x, uint8_t *data) {
     if (x < 0) {
         if (x == INT64_MIN) {
-            memcpy(data, "-9223372036854775808", 20);
+            memcpy(data, "-9223372036854775808", 21);
             return 20;
         }
         data[0] = '-';

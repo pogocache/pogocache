@@ -2123,7 +2123,7 @@ static void bgscan_done(struct conn *conn, void *udata) {
     struct scan_ctx *ctx = udata;
     int proto = conn_proto(conn);
     char scursor[32];
-    size_t clen = snprintf(scursor, sizeof(scursor), "%" PRIu64, ctx->cursor);
+    size_t clen = u64toa(ctx->cursor, (uint8_t*)scursor);
     if (proto == PROTO_POSTGRES) {
         pg_write_row_desc(conn, (const char*[]){ "key", "cursor" }, 2);
     } else {
