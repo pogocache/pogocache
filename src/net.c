@@ -1337,6 +1337,9 @@ ssize_t net_conn_write(struct net_conn *conn, const char *bytes, size_t nbytes){
 
 // returns address for net_conn, allocates a new 
 const char *net_conn_addr(struct net_conn *conn) {
+#ifdef __EMSCRIPTEN__
+    return "wasm";
+#endif
     if (conn->addr) {
         return conn->addr;
     }
