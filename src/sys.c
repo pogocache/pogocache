@@ -289,8 +289,8 @@ uint64_t sys_threadid(void) {
 
 const char *sys_os(void) {
     static __thread char buf[1024];
-    char fdata[512];
 #ifdef __linux__
+    char fdata[512];
     FILE *f = fopen("/etc/os-release", "r");
     if (f) {
         size_t n = fread(fdata, 1, sizeof(fdata)-1, f);
@@ -308,6 +308,7 @@ const char *sys_os(void) {
         }
     }
 #elif defined(__APPLE__)
+    char fdata[512];
     FILE *f = popen("sw_vers -productVersion", "r");
     if (f) {
         size_t n = fread(fdata, 1, sizeof(fdata)-1, f);
