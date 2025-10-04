@@ -247,7 +247,7 @@ const char *sys_arch(void) {
 }
 
 const char *sys_libc(void) {
-#if TARGET_OS_MAC || TARGET_OS_IOS
+#ifdef __APPLE__
     return "libSystem";
 #elif defined(__MUSL__)
     return "musl";
