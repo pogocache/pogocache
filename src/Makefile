@@ -109,7 +109,8 @@ OBJS += hashmap.o monitor.o
 	$(CC) $(CFLAGS) -o ../pogocache$(OUTEXT) $(LDFLAGS) $(OBJS) $(CLIBS)
 
 clean:
-	rm -rf *.o *.dSYM *.out *.a gitinfo.h ../pogocache
+	rm -rf *.o *.dSYM *.out *.a gitinfo.h ../pogocache 
+	rm -rf ../pogocache.html ../pogocache.js ../pogocache.wasm
 
 distclean: 
 	rm -rf ../deps/openssl/ ../deps/liburing/ ../deps/mimalloc/ 
