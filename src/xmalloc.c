@@ -186,3 +186,10 @@ void xpurge(void) {
         break;
     }
 }
+
+
+size_t xrss(void) {
+    struct sys_meminfo info;
+    sys_getmeminfo(&info);
+    return info.rss;
+}

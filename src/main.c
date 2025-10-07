@@ -62,7 +62,6 @@ char *tlscacertfile = "";     // tls ca cert file
 char *uring = "yes";          // use uring (linux only)
 int maxconns = 1024;          // maximum number of sockets
 char *autosweep = "yes";      // perform automatic sweeps of expired entries
-char *noticker = "no";
 char *warmup = "yes";
 #if !defined(NOMIMALLOC)
 char *allocator = "mimalloc";
@@ -308,7 +307,7 @@ void sigterm(int sig) {
     }
 }
 
-static void *sigtermchecker(void *arg) {
+static void *sigtermticker(void *arg) {
     (void)arg;
     while (atomic_load_explicit(&sigexit, memory_order_relaxed) == 0) {
         usleep(100000);
@@ -330,66 +329,93 @@ static void *sigtermchecker(void *arg) {
     return 0;
 }
 
-static void tick(void) {
-    if (!atomic_load_explicit(&loaded, __ATOMIC_ACQUIRE)) {
-        return;
-    }
-    // Memory usage check
-    if (memlimit < SIZE_MAX) {
-        struct sys_meminfo meminfo;
-        sys_getmeminfo(&meminfo);
-        size_t memusage = meminfo.rss;
-        if (verb >= 1) {
-            char usage[64], limit[64];
-            printf(". Memory (usage=%s, limit=%s)\n", 
-                memstr(memusage, usage), memstr(memlimit, limit));
-        }
-        if (!lowmem) {
-            if (memusage > memlimit) {
-                atomic_store(&lowmem, true);
-                if (verb >= 1) {
-                    printf("# Low memory mode on\n");
-                }
-            }
-        } else {
-            if (memusage < memlimit) {
-                atomic_store(&lowmem, false);
-                if (verb >= 1) {
-                    printf("# Low memory mode off\n");
-                }
-            }
-        }
-    }
-
-    // Print allocations to terminal.
-    if (usetrackallocs) {
-        printf(". keys=%zu, allocs=%zu, conns=%zu\n",
-            pogocache_count(cache, 0), xallocs(), net_nconns());
-    }
-
-    if (useautosweep) {
-        // Auto sweep shards to remove expired entries. Choose a random shard.
-        // If more than 10% of the shards entries are expired then immediately
-        // sweep all the shards.
-        int64_t time = sys_now();
-        struct pogocache_sweep_poll_opts opts = { 
-            .time = time, 
-            .pollsize = 20,
-        };
-        if (pogocache_sweep_poll(cache, &opts) > 0.10) {
-            struct pogocache_sweep_opts opts = { .time = time };
-            pogocache_sweep(cache, 0, 0, &opts);
-        }
-    }
-}
-
-static void *ticker(void *arg) {
+static void *memticker(void *arg) {
     (void)arg;
+    char usage[64];
+    char limit[64];
+    memstr(memlimit, limit);
     while (1) {
-        tick();
+        if (atomic_load_explicit(&loaded, __ATOMIC_ACQUIRE)) {
+            size_t rss = xrss();
+            memstr(rss, usage);
+            if (memlimit < SIZE_MAX) {
+                if (verb >= 1) {
+                    printf(". Memory (usage=%s, limit=%s)\n", usage, limit);
+                }
+                if (!lowmem) {
+                    if (rss > memlimit) {
+                        atomic_store(&lowmem, true);
+                        if (verb >= 1) {
+                            printf("# Low memory mode on\n");
+                        }
+                    }
+                } else {
+                    if (rss < memlimit) {
+                        atomic_store(&lowmem, false);
+                        if (verb >= 1) {
+                            printf("# Low memory mode off\n");
+                        }
+                    }
+                }
+            }
+            // Print allocations to terminal.
+            if (usetrackallocs) {
+                printf(". keys=%zu, allocs=%zu, rss=%s conns=%zu\n",
+                    pogocache_count(cache, 0), xallocs(), usage, net_nconns());
+            }
+        }
         sleep(1);
     }
     return 0;
+}
+
+static void *autosweepticker(void *arg) {
+    (void)arg;
+    while (1) {
+        if (atomic_load_explicit(&loaded, __ATOMIC_ACQUIRE)) {
+            // Auto sweep shards to remove expired entries. Choose a random
+            // shard. If more than 10% of the shards entries are expired then
+            // immediately sweep all the shards.
+            int64_t time = sys_now();
+            struct pogocache_sweep_poll_opts opts = { 
+                .time = time, 
+                .pollsize = 20,
+            };
+            if (pogocache_sweep_poll(cache, &opts) > 0.10) {
+                struct pogocache_sweep_opts opts = { .time = time };
+                pogocache_sweep(cache, 0, 0, &opts);
+            }
+        }
+        sleep(1);
+    }
+    return 0;
+}
+
+static void start_sigtermticker(void) {
+    pthread_t th;
+    int ret = pthread_create(&th, 0, sigtermticker, 0);
+    if (ret == -1) {
+        perror("# pthread_create(sigtermticker)");
+        exit(1);
+    }
+}
+
+static void start_memticker(void) {
+    pthread_t th;
+    int ret = pthread_create(&th, 0, memticker, 0);
+    if (ret == -1) {
+        perror("# pthread_create(memticker)");
+        exit(1);
+    }
+}
+
+static void start_autosweepticker(void) {
+    pthread_t th;
+    int ret = pthread_create(&th, 0, autosweepticker, 0);
+    if (ret == -1) {
+        perror("# pthread_create(autosweepticker)");
+        exit(1);
+    }
 }
 
 static void listening(void *udata) {
@@ -499,7 +525,7 @@ int main(int argc, char *argv[]) {
             AFLAG("seed", seed = strtoull(flag, 0, 10))
             AFLAG("auth", auth = flag)
             AFLAG("persist", persist = flag)
-            AFLAG("noticker", noticker = flag)
+            AFLAG("noticker", (void)flag )
             AFLAG("autosweep", autosweep = flag)
             AFLAG("warmup", warmup = flag)
             AFLAG("allocator", allocator = flag)
@@ -754,22 +780,11 @@ int main(int argc, char *argv[]) {
         loadfactor, useautosweep?"yes":"no");
     printf("* Security (auth: %s, tlsport: %s)\n", 
         strlen(auth)>0?"enabled":"disabled", *tlsport?tlsport:"none");
-    if (strcmp(noticker, "yes") == 0) {
-        printf("# NO TICKER\n");
-    } else {
-        pthread_t th;
-        int ret = pthread_create(&th, 0, ticker, 0);
-        if (ret == -1) {
-            perror("# pthread_create(ticker)");
-            exit(1);
-        }
-    }
 
-    pthread_t th;
-    int ret = pthread_create(&th, 0, sigtermchecker, 0);
-    if (ret == -1) {
-        perror("# pthread_create(sigtermchecker)");
-        exit(1);
+    start_sigtermticker();
+    start_memticker();
+    if (useautosweep) {
+        start_autosweepticker();
     }
 
 #ifdef DATASETOK
