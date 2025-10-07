@@ -1,0 +1,14 @@
+# External unit dependencies
+# See https://github.com/tidwall/pkg.sh
+
+# hashmap.c
+import github.com/tidwall/hashmap.c v0.8.1
+
+# lz4
+import https://raw.githubusercontent.com/lz4/lz4/refs/tags/v1.10.0/lib/lz4.c
+import https://raw.githubusercontent.com/lz4/lz4/refs/tags/v1.10.0/lib/lz4.h
+
+sum 2e91ffbc0b705b2743f3fbfb401928b057f7f6fb  hashmap.c
+sum 53fd5c051323caa1974d6bd88882f5827d364041  hashmap.h
+sum f5fe71d902fd00b17e3b965be00348e0672f5ff3  lz4.c
+sum 35855ab96a45eccda2009fc6b06462dd02bf0972  lz4.h

@@ -82,7 +82,7 @@ static struct bucket *bucket_at0(void *buckets, size_t bucketsz, size_t i) {
     return (struct bucket*)(((char*)buckets)+(bucketsz*i));
 }
 
-static struct bucket *bucket_at(struct hashmap *map, size_t index) {
+static struct bucket *bucket_at(const struct hashmap *map, size_t index) {
     return bucket_at0(map->buckets, map->bucketsz, index);
 }
 
@@ -94,7 +94,7 @@ static uint64_t clip_hash(uint64_t hash) {
     return hash & 0xFFFFFFFFFFFF;
 }
 
-static uint64_t get_hash(struct hashmap *map, const void *key) {
+static uint64_t get_hash(const struct hashmap *map, const void *key) {
     return clip_hash(map->hash(key, map->seed0, map->seed1));
 }
 
@@ -324,7 +324,7 @@ const void *hashmap_set(struct hashmap *map, const void *item) {
 // hashmap_get_with_hash works like hashmap_get but you provide your
 // own hash. The 'hash' callback provided to the hashmap_new function
 // will not be called
-const void *hashmap_get_with_hash(struct hashmap *map, const void *key, 
+const void *hashmap_get_with_hash(const struct hashmap *map, const void *key,
     uint64_t hash)
 {
     hash = clip_hash(hash);
@@ -344,7 +344,7 @@ const void *hashmap_get_with_hash(struct hashmap *map, const void *key,
 
 // hashmap_get returns the item based on the provided key. If the item is not
 // found then NULL is returned.
-const void *hashmap_get(struct hashmap *map, const void *key) {
+const void *hashmap_get(const struct hashmap *map, const void *key) {
     return hashmap_get_with_hash(map, key, get_hash(map, key));
 }
 
@@ -411,7 +411,7 @@ const void *hashmap_delete(struct hashmap *map, const void *key) {
 }
 
 // hashmap_count returns the number of items in the hash map.
-size_t hashmap_count(struct hashmap *map) {
+size_t hashmap_count(const struct hashmap *map) {
     return map->count;
 }
 
@@ -1149,5 +1149,6 @@ int main(void) {
 
 
 #endif
+
 
 
