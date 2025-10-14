@@ -1433,7 +1433,7 @@ static int loadop(const void *key, size_t keylen,
             }
             entry_settime(entry2, now);
             set_entry(bkt, entry2);
-            notify(shardidx, NOTIFY_REPLACED, entry, entry2, now, ctx);
+            notify(shardidx, NOTIFY_REPLACED, entry2, entry, now, ctx);
             entry_free(entry, ctx);
         }
     }
@@ -1559,7 +1559,7 @@ static int storeop(const void *key, size_t keylen, const void *val,
         if (!entry_alive(old, now)) {
             // There's an old entry, but it's no longer alive.
             // Notify the user, as if the entry was evicted through expiration.
-            notify(shardidx, NOTIFY_EXPIRED, 0, entry, now, ctx);
+            notify(shardidx, NOTIFY_EXPIRED, 0, old, now, ctx);
             entry_free(old, ctx);
             old = 0;
         }
