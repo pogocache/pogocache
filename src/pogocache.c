@@ -292,12 +292,13 @@ struct pgctx {
     void (*free)(void*);
     size_t (*malloc_size)(void*);
     void (*yield)(void *udata);
+    void *udata;
     void (*evicted)(int shard, int reason, int64_t time, const void *key,
         size_t keylen, const void *val, size_t vallen, int64_t expires,
         uint32_t flags, uint64_t cas, void *udata);
     void (*notify)(int shard, int64_t time, struct pogocache_entry *new_entry,
         struct pogocache_entry *old_entry, void *udata);
-    void *udata;
+    bool usenotify;
     bool usecas;
     bool nosixpack;
     bool noevict;
@@ -1026,6 +1027,9 @@ enum notify {
 static void notify(int shardidx, enum notify kind, struct entry *new, 
     struct entry *old, int64_t now, struct pgctx *ctx)
 {
+    if (!ctx->usenotify) {
+        return;
+    }
     int evict_reason = 0;
     switch (kind) {
     case NOTIFY_INSERTED:
@@ -1194,6 +1198,7 @@ static void opts_to_ctx(int nshards, struct pogocache_opts *opts,
         loadfactor = opts->loadfactor;
         ctx->allowshrink = opts->allowshrink;
         ctx->usethreadbatch = opts->usethreadbatch;
+        ctx->usenotify = ctx->notify || ctx->evicted;
     }
     // make loadfactor a floating point
     loadfactor = loadfactor == 0 ? DEFLOADFACTOR :
@@ -1555,14 +1560,12 @@ static int storeop(const void *key, size_t keylen, const void *val,
     if (!map_insert(&shard->map, entry, hash, &old, ctx)) {
         goto nomem;
     }
-    if (old) {
-        if (!entry_alive(old, now)) {
-            // There's an old entry, but it's no longer alive.
-            // Notify the user, as if the entry was evicted through expiration.
-            notify(shardidx, NOTIFY_EXPIRED, 0, old, now, ctx);
-            entry_free(old, ctx);
-            old = 0;
-        }
+    if (old && !entry_alive(old, now)) {
+        // There's an old entry, but it's no longer alive.
+        // Notify the user, as if the entry was evicted through expiration.
+        notify(shardidx, NOTIFY_EXPIRED, 0, old, now, ctx);
+        entry_free(old, ctx);
+        old = 0;
     }
     int put_back_status = 0;
     if (old) {
