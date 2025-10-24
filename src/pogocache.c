@@ -1755,6 +1755,10 @@ int pogocache_iter(struct pogocache *cache, struct pogocache_iter_opts *opts) {
 static struct pogocache_entry *entryiter(struct shard *shard, int64_t now,
     int shardidx, int *iter, struct pgctx *ctx)
 {
+    if (shard->map.count == 0) {
+        *iter = 0;
+        return 0;
+    }
     for (int i = *iter; i < shard->map.nbuckets; i++) {
         struct bucket *bkt = &shard->map.buckets[i];
         if (get_dib(bkt) == 0) {

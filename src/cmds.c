@@ -2096,7 +2096,7 @@ static void scan_ctx_free(struct scan_ctx *ctx) {
     }
 }
 
-static void bgscan_work(void *udata) {
+static void scan_work(void *udata) {
     struct scan_ctx *ctx = udata;
     while (ctx->len < ctx->count) {
         struct pogocache_entry *entry;
@@ -2119,7 +2119,7 @@ static void bgscan_work(void *udata) {
     }
 }
 
-static void bgscan_done(struct conn *conn, void *udata) {
+static void scan_done(struct conn *conn, void *udata) {
     struct scan_ctx *ctx = udata;
     int proto = conn_proto(conn);
     char scursor[32];
@@ -2213,10 +2213,11 @@ static void cmdSCAN(struct conn *conn, struct args *args) {
     ctx->count = count;
     ctx->now = now;
     ctx->cursor = cursor;
-    if (!conn_bgwork(conn, bgscan_work, bgscan_done, ctx)) {
-        conn_write_error(conn, "ERR failed to do work");
-        scan_ctx_free(ctx);
-    }
+
+    // call in the foreground
+    scan_work(ctx);
+    scan_done(conn, ctx);
+    
     return;
 err_syntax:
     conn_write_error(conn, ERR_SYNTAX_ERROR);
