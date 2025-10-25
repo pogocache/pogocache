@@ -584,6 +584,13 @@ static void cmdKEYS(struct conn *conn, struct args *args) {
     }
 }
 
+static void cmdSELECT(struct conn *conn, struct args *args) {
+    (void)args;
+    if (conn_proto(conn) == PROTO_RESP) {
+        conn_write_string(conn, "OK");
+    }
+}
+
 static void cmdDEL(struct conn *conn, struct args *args) {
     if (args->len < 2) {
         conn_write_error(conn, ERR_WRONG_NUM_ARGS);
@@ -2256,6 +2263,7 @@ static struct cmd cmds[] = {
     { "purge",     cmdPURGE    }, // pg
     { "sweep",     cmdSWEEP    }, // pg
     { "keys",      cmdKEYS     }, // pg
+    { "select",    cmdSELECT   }, // pg
     { "ping",      cmdPING     }, // pg
     { "touch",     cmdTOUCH    }, // pg
     { "debug",     cmdDEBUG    }, // pg
