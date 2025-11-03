@@ -20,6 +20,7 @@
 
 #define ERR_WRONG_NUM_ARGS      "ERR wrong number of arguments"
 #define ERR_SYNTAX_ERROR        "ERR syntax error"
+#define ERR_INDEX_OUT_OF_RANGE	"ERR index is out of range"
 #define ERR_INVALID_INTEGER     "ERR value is not an integer or out of range"
 #define ERR_OUT_OF_MEMORY       "ERR out of memory"
 #define CLIENT_ERROR_BAD_FORMAT "CLIENT_ERROR bad command line format"

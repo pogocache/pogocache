@@ -584,6 +584,24 @@ static void cmdKEYS(struct conn *conn, struct args *args) {
     }
 }
 
+static void cmdSELECT(struct conn *conn, struct args *args) {
+    if (args->len != 2) {
+        conn_write_error(conn, ERR_WRONG_NUM_ARGS);
+        return;
+    }
+    int64_t db = 0;
+    bool ok = parse_i64(args->bufs[1].data, args->bufs[1].len, &db);
+    const bool out_of_range = (ok && db > 0);
+    ok = (ok && !out_of_range);
+    if (!ok) {
+        conn_write_error(conn, (out_of_range) ? ERR_INDEX_OUT_OF_RANGE : ERR_INVALID_INTEGER);
+        return;
+    }
+    if (conn_proto(conn) == PROTO_RESP) {
+        conn_write_string(conn, "OK");
+    }
+}
+
 static void cmdDEL(struct conn *conn, struct args *args) {
     if (args->len < 2) {
         conn_write_error(conn, ERR_WRONG_NUM_ARGS);
@@ -2256,6 +2274,7 @@ static struct cmd cmds[] = {
     { "purge",     cmdPURGE    }, // pg
     { "sweep",     cmdSWEEP    }, // pg
     { "keys",      cmdKEYS     }, // pg
+    { "select",    cmdSELECT   }, // pg
     { "ping",      cmdPING     }, // pg
     { "touch",     cmdTOUCH    }, // pg
     { "debug",     cmdDEBUG    }, // pg
