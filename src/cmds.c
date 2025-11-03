@@ -1011,11 +1011,22 @@ static void cmdEXPIRE(struct conn *conn, struct args *args) {
     };
     int status = pogocache_load(cache, key, keylen, &lopts);
     int ret = status == POGOCACHE_FOUND;
-    if (conn_proto(conn) == PROTO_POSTGRES) {
+    int proto = conn_proto(conn);
+    switch (proto) {
+    case PROTO_POSTGRES:
         pg_write_completef(conn, "EXPIRE %d", ret);
         pg_write_ready(conn, 'I');
-    } else {
+        break;
+    case PROTO_MEMCACHE:
+        if (ret) {
+            conn_write_raw_cstr(conn, "TOUCHED\r\n");
+        } else {
+            conn_write_raw_cstr(conn, "NOT_FOUND\r\n");
+        }
+        break;
+    default:
         conn_write_int(conn, ret);
+        break;
     }
 }
 
@@ -1572,9 +1583,16 @@ static void cmdTOUCH(struct conn *conn, struct args *args) {
             stat_touch_misses_incr(conn);
         }
     }
-    if (conn_proto(conn) == PROTO_POSTGRES) {
+    int proto = conn_proto(conn);
+    if (proto == PROTO_POSTGRES) {
         pg_write_completef(conn, "TOUCH %" PRIi64, touched);
         pg_write_ready(conn, 'I');
+    } else if (proto == PROTO_MEMCACHE) {
+        if (touched > 0) {
+            conn_write_raw_cstr(conn, "TOUCHED\r\n");
+        } else {
+            conn_write_raw_cstr(conn, "NOT_FOUND\r\n");
+        }
     } else {
         conn_write_int(conn, touched);
     }
@@ -1680,7 +1698,8 @@ static void execINCRDECR(struct conn *conn, const char *key, size_t keylen,
         goto done;
     }
     assert(status == POGOCACHE_INSERTED || status == POGOCACHE_REPLACED);
-    if (conn_proto(conn) == PROTO_POSTGRES) {
+    int proto = conn_proto(conn);
+    if (proto == PROTO_POSTGRES) {
         char val[24];
         if (isunsigned) {
             snprintf(val, sizeof(val), "%" PRIu64, ctx.uval);
@@ -1693,6 +1712,9 @@ static void execINCRDECR(struct conn *conn, const char *key, size_t keylen,
             conn_write_uint(conn, ctx.uval);
         } else {
             conn_write_int(conn, ctx.ival);
+        }
+        if (proto == PROTO_MEMCACHE) {
+            conn_write_raw_cstr(conn, "\r\n");
         }
     }
     hit = true;
@@ -2062,11 +2084,12 @@ static void cmdSTATS(struct conn *conn, struct args *args) {
 
 static void cmdVERSION(struct conn *conn, struct args *args) {
     (void)args;
-    if (conn_proto(conn) == PROTO_MEMCACHE) {
+    int proto = conn_proto(conn);
+    if (proto == PROTO_MEMCACHE) {
         conn_write_raw_cstr(conn, "VERSION ");
         conn_write_raw_cstr(conn, version);
-        conn_write_raw_cstr(conn, "\n");
-    } else if (conn_proto(conn) == PROTO_POSTGRES) {
+        conn_write_raw_cstr(conn, "\r\n");
+    } else if (proto == PROTO_POSTGRES) {
         pg_write_row_desc(conn, (const char*[]){ "version" }, 1);
             pg_write_row_data(conn, (const char*[]){ version },
                 (size_t[]){ strlen(version) }, 1);
