@@ -584,7 +584,17 @@ static void cmdKEYS(struct conn *conn, struct args *args) {
     }
 }
 
+// SELECT 0
+// This is an undocumented RESP only command that exists in order to provide
+// compatibility for certain integrations that need it.
 static void cmdSELECT(struct conn *conn, struct args *args) {
+    if (conn_proto(conn) != PROTO_RESP) {
+        char msg[64];
+        snprintf(msg, 64, "ERR unknown command '%.*s'", 
+            (int)args->bufs[0].len, args->bufs[0].data);
+        conn_write_error(conn, msg);
+        return;
+    }
     if (args->len != 2) {
         conn_write_error(conn, ERR_WRONG_NUM_ARGS);
         return;
@@ -594,12 +604,11 @@ static void cmdSELECT(struct conn *conn, struct args *args) {
     const bool out_of_range = (ok && db > 0);
     ok = (ok && !out_of_range);
     if (!ok) {
-        conn_write_error(conn, (out_of_range) ? ERR_INDEX_OUT_OF_RANGE : ERR_INVALID_INTEGER);
+        conn_write_error(conn, (out_of_range) ? ERR_INDEX_OUT_OF_RANGE : 
+            ERR_INVALID_INTEGER);
         return;
     }
-    if (conn_proto(conn) == PROTO_RESP) {
-        conn_write_string(conn, "OK");
-    }
+    conn_write_string(conn, "OK");
 }
 
 static void cmdDEL(struct conn *conn, struct args *args) {
