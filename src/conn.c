@@ -440,3 +440,19 @@ bool pg_execute(struct conn *conn) {
 struct pg *conn_pg(struct conn *conn) {
     return conn->pg;
 }
+
+int conn_setnonblock(struct conn *conn, bool set) {
+    return net_conn_setnonblock(conn->conn5, set);
+}
+
+ssize_t conn_read(struct conn *conn, char *bytes, size_t nbytes) {
+    return net_conn_read(conn->conn5, bytes, nbytes);
+}
+
+ssize_t conn_write(struct conn *conn, const char *bytes, size_t nbytes) {
+    return net_conn_write(conn->conn5, bytes, nbytes);
+}
+
+const char *conn_addr(struct conn *conn) {
+    return net_conn_addr(conn->conn5);
+}

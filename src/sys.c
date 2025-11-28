@@ -24,10 +24,18 @@
 #include <stdlib.h>
 #include <time.h>
 #include <math.h>
-#ifdef __APPLE__
+#if defined(__APPLE__)
 #include <mach/mach_time.h>
 #include <mach/mach.h>
+#include <sys/utsname.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#elif defined(__linux__)
+#include <sys/utsname.h>
+#elif defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
 #endif
+
 #include "sys.h"
 
 int sys_nprocs(void) {
@@ -63,7 +71,7 @@ int sys_nprocs(void) {
     return nprocs;
 }
 
-#ifndef __linux__
+#if !defined(__linux__) && !defined(__EMSCRIPTEN__)
 #include <sys/sysctl.h>
 #endif
 
@@ -96,6 +104,11 @@ size_t sys_memory(void) {
         }
         fclose(f);
     }
+#elif defined(__EMSCRIPTEN__)
+    size_t heap_size = EM_ASM_INT({
+        return HEAP8.buffer.byteLength;
+    });
+    return heap_size;
 #else
     size_t memsize = 0;
     size_t len = sizeof(memsize);
@@ -103,20 +116,19 @@ size_t sys_memory(void) {
         sysmem = memsize;
     }
 #endif
-    if (sysmem == 0) {
-        fprintf(stderr, "# could not detect total system memory, bailing\n");
-        exit(1);
-    }
     return sysmem;
 }
 
 uint64_t sys_seed(void) {
+#ifdef __EMSCRIPTEN__
+    return 0;
+#else
     #define NSEEDCAP 64
     static __thread int nseeds = 0;
     static __thread uint64_t seeds[NSEEDCAP];
     if (nseeds == 0) {
         // Generate a group of new seeds
-        FILE *f = fopen("/dev/urandom", "rb+");
+        FILE *f = fopen("/dev/urandom", "rb");
         if (!f) {
             perror("# /dev/urandom");
             exit(1);
@@ -128,12 +140,23 @@ uint64_t sys_seed(void) {
         nseeds = NSEEDCAP;
     }
     return seeds[--nseeds];
+#endif
 }
+
+#ifdef __EMSCRIPTEN__
+static int64_t add_time_delta = 0;
+void add_time(int extra_milliseconds) {
+    add_time_delta += (int64_t)extra_milliseconds * (int64_t)1000000;
+}
+#endif
 
 static int64_t nanotime(struct timespec *ts) {
     int64_t x = ts->tv_sec;
     x *= 1000000000;
     x += ts->tv_nsec;
+#ifdef __EMSCRIPTEN__
+    x += add_time_delta;
+#endif
     return x;
 }
 
@@ -170,6 +193,11 @@ void sys_getmeminfo(struct sys_meminfo *info) {
     info->virt = taskInfo.virtual_size;
     info->rss = taskInfo.resident_size;
 }
+#elif defined(__EMSCRIPTEN__) 
+void sys_getmeminfo(struct sys_meminfo *info) {
+    info->virt = 0;
+    info->rss = 0;
+}
 #elif __linux__
 void sys_getmeminfo(struct sys_meminfo *info) {
     FILE *f = fopen("/proc/self/statm", "r");
@@ -199,12 +227,14 @@ void sys_getmeminfo(struct sys_meminfo *info) {
 
 const char *sys_arch(void) {
     static __thread bool got = false;
-    static __thread char arch[1024] = "unknown/error";
+    static __thread char arch[1024] = "unknown/unknown";
     if (!got) {
-        struct utsname unameData;
-        if (uname(&unameData) == 0) {
-            snprintf(arch, sizeof(arch), "%s/%s", unameData.sysname, 
-                unameData.machine);
+        struct utsname uts;
+        if (uname(&uts) == 0) {
+            snprintf(arch, sizeof(arch), "%s/%s", uts.sysname,
+                strcmp(uts.machine, "aarch64")==0?"arm64":
+                strcmp(uts.machine, "x86_64")==0?"amd64":
+                uts.machine);
             char *p = arch;
             while (*p) {
                 *p = tolower(*p);
@@ -214,6 +244,20 @@ const char *sys_arch(void) {
         }
     }
     return arch;
+}
+
+const char *sys_libc(void) {
+#ifdef __APPLE__
+    return "libSystem";
+#elif defined(__MUSL__)
+    return "musl";
+#elif defined(__EMSCRIPTEN__)
+    return "emcc";
+#elif defined(__GLIBC__)
+    return "glibc";
+#else
+    return "unknown";
+#endif
 }
 
 void sys_genuseid(char useid[16]) {
@@ -241,4 +285,47 @@ uint64_t sys_threadid(void) {
         id = atomic_fetch_add_explicit(&next, 1, __ATOMIC_RELEASE);
     }
     return id;
+}
+
+const char *sys_os(void) {
+    static __thread char buf[1024];
+#ifdef __linux__
+    char fdata[512];
+    FILE *f = fopen("/etc/os-release", "r");
+    if (f) {
+        size_t n = fread(fdata, 1, sizeof(fdata)-1, f);
+        fclose(f);
+        fdata[n] = '\0';
+        char *name = strstr(fdata, "PRETTY_NAME=\"");
+        if (name) {
+            name += 13;
+            char *end = strstr(name, "\"");
+            if (end) {
+                *end = '\0';
+                snprintf(buf, sizeof(buf), "%s", name);
+                return buf;
+            }
+        }
+    }
+#elif defined(__APPLE__)
+    char fdata[512];
+    FILE *f = popen("sw_vers -productVersion", "r");
+    if (f) {
+        size_t n = fread(fdata, 1, sizeof(fdata)-1, f);
+        pclose(f);
+        fdata[n] = '\0';
+        if (n > 0 && fdata[n-1] == '\n') {
+            fdata[n-1] = '\0';
+            snprintf(buf, sizeof(buf), "macOS %s", fdata);
+            return buf;
+        }
+    }
+#endif
+    struct utsname uts;
+    if (uname(&uts) == 0) {
+        snprintf(buf, sizeof(buf), "%s %s", uts.sysname, uts.release);
+    } else {
+        snprintf(buf, sizeof(buf), "unknown");
+    }
+    return buf;
 }

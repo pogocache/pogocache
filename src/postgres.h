@@ -62,7 +62,6 @@ struct pg {
 struct pg *pg_new(void);
 void pg_free(struct pg *pg);
 bool pg_respond(struct conn *conn, struct pg *pg);
-void pg_free(struct pg *pg);
 
 bool pg_precommand(struct conn *conn, struct args *args, struct pg *pg);
 

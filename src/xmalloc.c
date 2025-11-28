@@ -27,6 +27,14 @@
 #define HAS_MALLOC_H
 #endif
 
+#ifndef NOMIMALLOC
+#include "../deps/mimalloc/include/mimalloc.h"
+#endif
+
+#ifndef NOJEMALLOC
+#include "../deps/jemalloc/include/jemalloc/jemalloc.h"
+#endif
+
 // from main.c
 extern const int useallocator;
 extern const bool usetrackallocs;
@@ -61,6 +69,25 @@ static void sub_alloc(void) {
 }
 #endif
 
+void xmalloc_init(int nthreads) {
+    (void)nthreads;
+    switch (useallocator) {
+#ifndef NOMIMALLOC
+    case ALLOCATOR_MIMALLOC:
+        // initialization for mimalloc
+        break;
+#endif
+#ifndef NOJEMALLOC
+    case ALLOCATOR_JEMALLOC:
+        // initialization for jemalloc
+        break;
+#endif
+    default:
+        // initialization for stock allocator
+        break;
+    }
+}
+
 static void check_ptr(void *ptr) {
     if (!ptr) {
         fprintf(stderr, "# %s\n", strerror(ENOMEM));
@@ -68,8 +95,56 @@ static void check_ptr(void *ptr) {
     }
 }
 
+static void *malloc0(size_t size) {
+    switch (useallocator) {
+#ifndef NOMIMALLOC
+    case ALLOCATOR_MIMALLOC:
+        return mi_malloc(size);
+#endif
+#ifndef NOJEMALLOC
+    case ALLOCATOR_JEMALLOC:
+        return je_malloc(size);
+#endif
+    default:
+        return malloc(size);
+    }
+}
+
+static void *realloc0(void *ptr, size_t size) {
+    switch (useallocator) {
+#ifndef NOMIMALLOC
+    case ALLOCATOR_MIMALLOC:
+        return mi_realloc(ptr, size);
+#endif
+#ifndef NOJEMALLOC
+    case ALLOCATOR_JEMALLOC:
+        return je_realloc(ptr, size);
+#endif
+    default:
+        return realloc(ptr, size);
+    }
+}
+
+static void free0(void *ptr) {
+    switch (useallocator) {
+#ifndef NOMIMALLOC
+    case ALLOCATOR_MIMALLOC:
+        mi_free(ptr);
+        break;
+#endif
+#ifndef NOJEMALLOC
+    case ALLOCATOR_JEMALLOC:
+        je_free(ptr);
+        break;
+#endif
+    default:
+        free(ptr);
+        break;
+    }
+}
+
 void *xmalloc(size_t size) {
-    void *ptr = malloc(size);
+    void *ptr = malloc0(size);
     check_ptr(ptr);
     add_alloc();
     return ptr;
@@ -79,7 +154,7 @@ void *xrealloc(void *ptr, size_t size) {
     if (!ptr) {
         return xmalloc(size);
     }
-    ptr = realloc(ptr, size);
+    ptr = realloc0(ptr, size);
     check_ptr(ptr);
     return ptr;
 }
@@ -88,13 +163,33 @@ void xfree(void *ptr) {
     if (!ptr) {
         return;
     }
-    free(ptr);
+    free0(ptr);
     sub_alloc();
 }
 
 void xpurge(void) {
-#ifdef HAS_MALLOC_H
     // Releases unused heap memory to OS
-    malloc_trim(0);
+    switch (useallocator) {
+#ifndef NOMIMALLOC
+    case ALLOCATOR_MIMALLOC:
+        mi_collect(true);
+        break;
 #endif
+#ifndef NOJEMALLOC
+    case ALLOCATOR_JEMALLOC:
+        break;
+#endif
+    default:
+#ifdef HAS_MALLOC_H
+        malloc_trim(0);
+#endif
+        break;
+    }
+}
+
+
+size_t xrss(void) {
+    struct sys_meminfo info;
+    sys_getmeminfo(&info);
+    return info.rss;
 }

@@ -1,8 +1,13 @@
 <p align="center">
 <img alt="Pogocache" src=".github/images/logo.png" width="600">
+<br><br>
+Fast caching software built from scratch with a focus on low latency and cpu efficency.<br>
+<strong>https://pogocache.com</strong>
 </p>
+<hr>
 
-Pogocache is fast caching software built from scratch with a focus on low latency and cpu efficency.
+
+
 
 **Faster**: Pogocache is faster than Memcache, Valkey, Redis, Dragonfly, and Garnet.
 It has the lowest latency per request, providing the quickest response times.
@@ -93,7 +98,7 @@ host address.
 Run Pogocache using the latest Docker image.
 
 ```sh
-docker run --net=host pogocache/pogocache
+docker run pogocache/pogocache
 ```
 
 ## CMake (alternative build)
@@ -150,6 +155,7 @@ Advanced options:
   --quickack yes/no      use quickack (linux)           (default: no)
   --uring yes/no         use uring (linux)              (default: yes)
   --loadfactor percent   hashmap load factor            (default: 75)
+  --autosweep yes/no     automatic eviction sweeps      (default: yes)
   --keysixpack yes/no    sixpack compress keys          (default: yes)
   --cas yes/no           use compare and store          (default: no)
 ```
@@ -287,173 +293,14 @@ Pogocache supports the commands from the [Memcache text protocol](https://docs.m
 
 ### RESP (Valkey/Redis)
 
-Pogocache has the following RESP commands, which can be used in your favorite
-Valkey/Redis command line tool or client library.
+Pogocache supports RESP commands, including
+`SET`, `GET`, `DEL`, `MGET`, `MGETS`, `TTL`, `PTTL`, `EXPIRE`, `DBSIZE`,
+`QUIT`, `ECHO`, `EXISTS`, `FLUSH`, `PURGE`, `SWEEP`, `KEYS`, `PING`,
+`APPEND`, `PREPEND`, `AUTH`, `SAVE`, `LOAD`
 
-[SET](#resp-set), [GET](#resp-get), [DEL](#resp-del), [MGET](#resp-mget), [MGETS](#resp-mgets), [TTL](#resp-ttl), [PTTL](#resp-pttl), [EXPIRE](#resp-expire), [DBSIZE](#resp-dbsize), [QUIT](#resp-quit), [ECHO](#resp-echo), [EXISTS](#resp-exists), [FLUSH](#resp-flush), [PURGE](#resp-purge), [SWEEP](#resp-sweep), [KEYS](#resp-keys), [PING](#resp-ping), [INCRBY](#resp-incrby), [DECRBY](#resp-decrby), [INCR](#resp-incr), [DECR](#resp-decr), [UINCRBY](#resp-uincrby), [UDECRBY](#resp-udecrby), [UINCR](#resp-uincr), [UDECR](#resp-udecr), [APPEND](#resp-append), [PREPEND](#resp-prepend), [AUTH](#resp-auth), [SAVE](#resp-save), [LOAD](#resp-load)
+These and more can be used with your favorite Valkey/Redis command line tool or client library.
 
-<table>
-<tr><td>
-  <a name="resp-set"></a>
-  <b>SET key value [NX | XX] [GET] [EX seconds | PX milliseconds | EXAT unix-time-seconds | PXAT unix-time-milliseconds | KEEPTTL] [FLAGS flags] [CAS cas]</b><br><br>
-  Store a value for key.
-</td></tr>
-<tr><td>
-<a name="resp-get"></a>
-  <b>GET key</b><br><br>
-  Get a value for key.
-</td></tr>
-<tr><td>
-  <a name="resp-del"></a>
-  <b>DEL key</b><br><br>
-  Delete a value for key.
-</td></tr>
-<tr><td>
-  <a name="resp-mget"></a>
-  <b>MGET key [key ...]</b><br><br>
-  Get values for multiple keys.
-</td></tr>
-<tr><td>
-  <a name="resp-mgets"></a>
-  <b>MGETS key [key ...]</b><br><br>
-  Get value, flag, and CAS for multiple keys
-  <br><br>
-  To get a non-zero cas number, the CAS feature in Pogocache must be active using `--cas=yes` program flag.
-</td></tr>
-<tr><td>
-  <a name="resp-ttl"></a>
-  <b>TTL key</b><br><br>
-  Get the remaining seconds for time to live for a key.
-</td></tr>
-<tr><td>
-  <a name="resp-pttl"></a>
-  <b>PTTL key</b><br><br>
-  Get the remaining milliseconds for time to live for a key.
-</td></tr>
-<tr><td>
-  <a name="resp-expire"></a>
-  <b>EXPIRE key seconds</b><br><br>
-  Set or reset a time to live, as seconds, on a key.
-</td></tr>
-<tr><td>
-  <a name="resp-dbsize"></a>
-  <b>DBSIZE</b><br><br>
-  Get the total number of keys in cache.
-</td></tr>
-<tr><td>
-  <a name="resp-quit"></a>
-  <b>QUIT</b><br><br>
-  Quit the current client connection
-</td></tr>
-<tr><td>
-  <a name="resp-echo"></a>
-  <b>ECHO message</b><br><br>
-  Send the server a message, which is sent back.
-</td></tr>
-<tr><td>
-  <a name="resp-ping"></a>
-  <b>PING [message]</b><br><br>
-  Ping the server with an optional message.
-</td></tr>
-<tr><td>
-  <a name="resp-exists"></a>
-  <b>EXISTS key [key ...]</b><br><br>
-  Checks if one or more keys exist in the cache.
-</td></tr>
-<tr><td>
-  <a name="resp-flush"></a>
-  <b>FLUSH [SYNC|ASYNC] [DELAY <seconds>]</b><br><br>
-  Clears the cache.
-</td></tr>
-<tr><td>
-  <a name="resp-sweep"></a>
-  <b>SWEEP [ASYNC]</b><br><br>
-  Removes all expired entries from the cache.
-</td></tr>
-<tr><td>
-  <a name="resp-purge"></a>
-  <b>PURGE [ASYNC]</b><br><br>
-  Release unused memory back to the operating system. 
-</td></tr>
-<tr><td>
-  <a name="resp-keys"></a>
-  <b>KEYS pattern</b><br><br>
-  Get keys matching pattern. 
-  <br><br>
-  Supports a very simple pattern matcher where '*' matches on any number characters and '?' matches on any one character.
-</td></tr>
-<tr><td>
-  <a name="resp-incrby"></a>
-  <b>INCRBY key delta</b><br><br>
-  Increment a 64-bit signed integer by delta.
-</td></tr>
-<tr><td>
-  <a name="resp-decrby"></a>
-  <b>DECRBY key delta</b><br><br>
-  Decrement a 64-bit signed integer by delta.
-</td></tr>
-<tr><td>
-  <a name="resp-incr"></a>
-  <b>INCR key</b><br><br>
-  Increment a 64-bit signed integer by one.
-</td></tr>
-<tr><td>
-  <a name="resp-decr"></a>
-  <b>DECR key</b><br><br>
-  Decrement a 64-bit signed integer by one.
-</td></tr>
-<tr><td>
-  <a name="resp-uincrby"></a>
-  <b>UINCRBY key delta</b><br><br>
-  Increment a 64-bit unsigned integer by delta.
-</td></tr>
-<tr><td>
-  <a name="resp-udecrby"></a>
-  <b>UDECRBY key delta</b><br><br>
-  Decrement a 64-bit unsigned integer by delta.
-</td></tr>
-<tr><td>
-  <a name="resp-uincr"></a>
-  <b>UINCR key</b><br><br>
-  Increment a 64-bit unsigned integer by delta.
-</td></tr>
-<tr><td>
-  <a name="resp-udecr"></a>
-  <b>UDECR key</b><br><br>
-  Decrement a 64-bit unsigned integer by delta.
-</td></tr>
-<tr><td>
-  <a name="resp-append"></a>
-  <b>APPEND key value</b><br><br>
-  Concatenate value at the end of the current string.
-</td></tr>
-<tr><td>
-  <a name="resp-prepend"></a>
-  <b>PREPEND key value</b><br><br>
-  Concatenate value at the start of the current string.
-</td></tr>
-<tr><td>
-  <a name="resp-auth"></a>
-  <b>AUTH password</b><br><br>
-  Authorize the current connection using the same password provided to the Pogocache `--auth` flag.
-</td></tr>
-<tr><td>
-  <a name="resp-save"></a>
-  <b>SAVE [TO path] [FAST]</b><br><br>
-  Save a copy of the cache to file provided at path. If a path is not provided then the cache is saved to the file assigned to the Pogocache `--persist` flag.
-  <br><br>
-  Use FAST to make the saving process use all machine cores, making the operation
-  finish quicker, but may slow down other concurrent connections when the cache is very large.
-</td></tr>
-<tr><td>
-  <a name="resp-load"></a>
-  <b>LOAD [FROM path] [FAST]</b><br><br>
-  Load a copy of the cache from file provided at path. If a path is not provided then the cache is saved to the file assigned to the Pogocache `--persist` flag.
-  <br><br>
-  Use FAST to make the saving process use all machine cores, making the operation
-  finish quicker, but may slow down other concurrent connections when the cache is very large.
-</td></tr>
-</table>
+See https://pogocache.com/docs/commands for a complete list commands and examples.
 
 ### Postgres
 
@@ -788,8 +635,9 @@ The other way an entry may be evicted is when the program is low on memory.
 When memory is low the insert operation will automatically choose to evict some older entry, using the [2-random algorithm](https://danluu.com/2choices-eviction/).
 
 Low memory evictions free up memory immediately to make room for new entries.
-Expiration evictions, on the other hand, will not free the memory until the 
-entry's container bucket is accessed, or until the sweep operation is called.
+Expiration evictions, on the other hand, free up eventually using periodic 
+background sweeps. These background sweeps ensure that no more than 10% of the 
+total cache memory is used up by evicted entries.
 
 ## Roadmap and status
 

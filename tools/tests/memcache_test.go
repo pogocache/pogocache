@@ -19,6 +19,8 @@ func TestMemcache(t *testing.T) {
 	if err := mc.FlushAll(); err != nil {
 		t.Fatal(err)
 	}
+	defer mc.Close()
+
 	keys := make(map[string]string)
 	for len(keys) < 10000 {
 		key := randString(128)
@@ -112,4 +114,74 @@ func TestMemcacheIssue15(t *testing.T) {
 	resp, err = mcRawDo(mc, "get counter\r\n")
 	assert.Nil(t, err)
 	assert.Equal(t, "VALUE counter 16 1\r\n2\r\nEND\r\n", resp)
+}
+
+func TestMemcacheTextProtocol(t *testing.T) {
+	conn, err := net.Dial("tcp", "127.0.0.1:9401")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	if resp, err := mcRawDo(conn, "flush_all\r\n"); err != nil {
+		t.Fatalf("flush failed: %v", err)
+	} else if resp != "OK\r\n" {
+		t.Fatalf("unexpected flush response: %q", resp)
+	}
+
+	t.Run("version", func(t *testing.T) {
+		resp, err := mcRawDo(conn, "version\r\n")
+		if err != nil {
+			t.Fatalf("version failed: %v", err)
+		}
+		if !strings.HasPrefix(resp, "VERSION ") {
+			t.Fatalf("unexpected version response: %q", resp)
+		}
+		if !strings.HasSuffix(resp, "\r\n") {
+			t.Fatalf("version missing CRLF: %q", resp)
+		}
+	})
+
+	t.Run("incr/decr", func(t *testing.T) {
+		if resp, err := mcRawDo(conn, "set num 0 0 1\r\n0\r\n"); err != nil {
+			t.Fatalf("set failed: %v", err)
+		} else if resp != "STORED\r\n" {
+			t.Fatalf("unexpected set resp: %q", resp)
+		}
+		if resp, err := mcRawDo(conn, "incr num 1\r\n"); err != nil {
+			t.Fatalf("incr failed: %v", err)
+		} else if resp != "1\r\n" {
+			t.Fatalf("unexpected incr resp: %q", resp)
+		}
+		if resp, err := mcRawDo(conn, "decr num 1\r\n"); err != nil {
+			t.Fatalf("decr failed: %v", err)
+		} else if resp != "0\r\n" {
+			t.Fatalf("unexpected decr resp: %q", resp)
+		}
+		if resp, err := mcRawDo(conn, "incr missing 1\r\n"); err != nil {
+			t.Fatalf("incr missing failed: %v", err)
+		} else if resp != "NOT_FOUND\r\n" {
+			t.Fatalf("unexpected miss resp: %q", resp)
+		}
+	})
+
+	t.Run("touch", func(t *testing.T) {
+		if resp, err := mcRawDo(conn, "set touchkey 0 1 1\r\n0\r\n"); err != nil {
+			t.Fatalf("set touchkey failed: %v", err)
+		} else if resp != "STORED\r\n" {
+			t.Fatalf("unexpected set resp: %q", resp)
+		}
+		if resp, err := mcRawDo(conn, "touch touchkey 1\r\n"); err != nil {
+			t.Fatalf("touch hit failed: %v", err)
+		} else if resp != "TOUCHED\r\n" {
+			t.Fatalf("unexpected touch hit resp: %q", resp)
+		}
+		time.Sleep(1100 * time.Millisecond)
+		if resp, err := mcRawDo(conn, "touch touchkey 1\r\n"); err != nil {
+			t.Fatalf("touch miss failed: %v", err)
+		} else if resp != "NOT_FOUND\r\n" {
+			t.Fatalf("unexpected touch miss resp: %q", resp)
+		}
+	})
+
 }

@@ -152,7 +152,7 @@ int save(const char *path, bool fast) {
     char *workpath = xmalloc(psize);
     snprintf(workpath, psize, "%s.%08x.pogocache.work", path, 
         (int)(seed%INT_MAX));
-    if (verb > 1) {
+    if (verb >= 2) {
         printf(". Saving to work file %s\n", workpath);
     }
     int fd = open(workpath, O_RDWR|O_CREAT, S_IRUSR|S_IRGRP|S_IROTH);

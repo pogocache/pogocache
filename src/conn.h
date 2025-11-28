@@ -20,6 +20,7 @@
 
 #define ERR_WRONG_NUM_ARGS      "ERR wrong number of arguments"
 #define ERR_SYNTAX_ERROR        "ERR syntax error"
+#define ERR_INDEX_OUT_OF_RANGE	"ERR index is out of range"
 #define ERR_INVALID_INTEGER     "ERR value is not an integer or out of range"
 #define ERR_OUT_OF_MEMORY       "ERR out of memory"
 #define CLIENT_ERROR_BAD_FORMAT "CLIENT_ERROR bad command line format"
@@ -30,6 +31,14 @@ struct conn;
 void conn_close(struct conn *conn);
 bool conn_isclosed(struct conn *conn);
 bool conn_istls(struct conn *conn);
+
+// only use these from bgwork threads
+ssize_t conn_read(struct conn *conn, char *bytes, size_t nbytes);
+ssize_t conn_write(struct conn *conn, const char *bytes, size_t nbytes);
+int conn_fd(struct conn *conn);
+int conn_setnonblock(struct conn *conn, bool set);
+
+const char *conn_addr(struct conn *conn);
 
 void conn_write_error(struct conn *conn, const char *err);
 void conn_write_raw(struct conn *conn, const void *data, size_t len);

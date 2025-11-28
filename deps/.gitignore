@@ -1,3 +1,7 @@
 openssl/
 liburing/
+mimalloc/
+jemalloc/
+lua/
+quickjs/
 *.tar.gz
