@@ -1,0 +1,6 @@
+FROM ubuntu:22.04
+RUN apt update -y
+RUN apt install -y build-essential git cmake autoconf
+COPY . /pogocache
+RUN cd /pogocache && tar -xzf repo.tar.gz
+RUN cd /pogocache/src && NOGITINFOGEN=1 make all

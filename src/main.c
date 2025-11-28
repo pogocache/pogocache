@@ -46,6 +46,7 @@ char *tcpnodelay = "yes";     // disable nagle's algorithm
 char *quickack = "no";        // enable quick acks
 char *usecas = "no";          // enable compare and store
 char *keepalive = "yes";      // socket keepalive setting
+int nshards = 4096;           // number of shards
 int backlog = 1024;           // network socket accept backlog
 int queuesize = 128;          // event queue size
 char *maxmemory = "80%";      // Maximum memory allowed - 80% total system
@@ -60,8 +61,15 @@ char *tlskeyfile = "";        // tls key file
 char *tlscacertfile = "";     // tls ca cert file
 char *uring = "yes";          // use uring (linux only)
 int maxconns = 1024;          // maximum number of sockets
-char *noticker = "no";
+char *autosweep = "yes";      // perform automatic sweeps of expired entries
 char *warmup = "yes";
+#if !defined(NOMIMALLOC)
+char *allocator = "mimalloc";
+#elif !defined(NOJEMALLOC)
+char *allocator = "jemalloc";
+#else
+char *allocator = "stock";
+#endif
 
 // Global variables calculated in main().
 // These should never change during the lifetime of the process.
@@ -72,11 +80,11 @@ uint64_t seed;
 size_t sysmem;
 size_t memlimit;
 int verb;           // verbosity, 0=no, 1=verbose, 2=very, 3=extremely
+bool useautosweep;
 bool usesixpack;
 int useallocator;
 bool usetrackallocs;
 bool useevict;
-int nshards;
 bool usetls;        // use tls security (pemfile required);
 bool useauth;       // use auth password
 bool usecolor;      // allow color in terminal
@@ -85,8 +93,6 @@ int64_t procstart;  // proc start boot time, for uptime stat
 
 // Global atomic variable. These are safe to read and modify by other source
 // files, as long as those sources use "atomic_" methods.
-atomic_int shutdownreq;          // shutdown request counter
-atomic_int_fast64_t flush_delay; // delay in seconds to next async flushall
 atomic_bool sweep;               // mark for async sweep, asap
 atomic_bool registered;          // registration is active
 atomic_bool lowmem;              // system is in low memory mode.
@@ -116,21 +122,16 @@ static void ready(void *udata) {
     } \
     fprintf(file, "\n");
 
-static int calc_nshards(int nprocs) {
-    switch (nprocs) {
-    case 1:  return 64;
-    case 2:  return 128;
-    case 3:  return 256;
-    case 4:  return 512;
-    case 5:  return 1024;
-    case 6:  return 2048;
-    default: return 4096;
-    }
-}
-
 static void showhelp(FILE *file) {
     int nprocs = sys_nprocs();
-    int nshards = calc_nshards(nprocs);
+    char allocators[256] = "";
+#ifndef NOMIMALLOC 
+    strcat(allocators, "mimalloc, ");
+#endif
+#ifndef NOJEMALLOC 
+    strcat(allocators, "jemalloc, ");
+#endif
+    strcat(allocators, "stock");
 
     HELP("Usage: %s [options]\n", "pogocache");
     HELP("\n");
@@ -170,8 +171,10 @@ static void showhelp(FILE *file) {
     HOPT("--quickack yes/no", "use quickack (linux)", "%s", quickack);
     HOPT("--uring yes/no", "use uring (linux)", "%s", uring);
     HOPT("--loadfactor percent", "hashmap load factor", "%d", loadfactor);
+    HOPT("--autosweep yes/no", "automatic eviction sweeps", "%s", autosweep);
     HOPT("--keysixpack yes/no", "sixpack compress keys", "%s", keysixpack);
     HOPT("--cas yes/no", "use compare and store", "%s", usecas);
+    HOPT("--allocator name", allocators, "%s", allocator);
     HELP("\n");
 }
 
@@ -223,6 +226,9 @@ fail:
 }
 
 static size_t setmaxrlimit(void) {
+#ifdef __EMSCRIPTEN__
+    return 0;
+#endif
     size_t maxconns = 0;
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
@@ -238,17 +244,6 @@ static size_t setmaxrlimit(void) {
         abort();
     }
     return maxconns;
-}
-
-static void evicted(int shard, int reason, int64_t time, const void *key,
-    size_t keylen, const void *value, size_t valuelen, int64_t expires,
-    uint32_t flags, uint64_t cas, void *udata)
-{
-    (void)value, (void)valuelen, (void)expires, (void)udata;
-    return;
-    printf(". evicted shard=%d, reason=%d, time=%" PRIi64 ", key='%.*s'"
-        ", flags=%" PRIu32 ", cas=%" PRIu64 "\n",
-        shard, reason, time, (int)keylen, (char*)key, flags, cas);
 }
 
 #define BEGIN_FLAGS() \
@@ -294,73 +289,133 @@ static void evicted(int shard, int reason, int64_t time, const void *key,
 
 static atomic_bool loaded = false;
 
+static atomic_int sigexit = 0;
+
+static void sigprint(const char *msg) {
+    ssize_t n = write(STDERR_FILENO, msg, strlen(msg));
+    (void)n;
+}
+
 void sigterm(int sig) {
     if (sig == SIGINT || sig == SIGTERM) {
-        if (!atomic_load(&loaded) || !*persist) {
-            printf("# Pogocache exiting now\n");
-            _Exit(0);
+        if (atomic_load_explicit(&sigexit, memory_order_relaxed)) {
+            sigprint("# User forced shutdown\n");
+            sigprint("# Pogocache exiting now\n");
+            _exit(0);
         }
-        if (*persist) {
-            printf("* Saving data to %s, please wait...\n", persist);
-            int ret = save(persist, true);
-            if (ret != 0) {
-                perror("# Save failed");
-                _Exit(1);
-            }
-            printf("# Pogocache exiting now\n");
-            _Exit(0);
-        }
-
-        int count = atomic_fetch_add(&shutdownreq, 1);
-        if (count > 0 && sig == SIGINT) {
-            printf("# User forced shutdown\n");
-            printf("# Pogocache exiting now\n");
-            _Exit(0);
-        }
+        atomic_store(&sigexit, 1);
     }
 }
 
-static void tick(void) {
-    if (!atomic_load_explicit(&loaded, __ATOMIC_ACQUIRE)) {
-        return;
-    }
-    // Memory usage check
-    if (memlimit < SIZE_MAX) {
-        struct sys_meminfo meminfo;
-        sys_getmeminfo(&meminfo);
-        size_t memusage = meminfo.rss;
-        if (!lowmem) {
-            if (memusage > memlimit) {
-                atomic_store(&lowmem, true);
-                if (verb > 0) {
-                    printf("# Low memory mode on\n");
-                }
-            }
-        } else {
-            if (memusage < memlimit) {
-                atomic_store(&lowmem, false);
-                if (verb > 0) {
-                    printf("# Low memory mode off\n");
-                }
-            }
-        }
-    }
-
-    // Print allocations to terminal.
-    if (usetrackallocs) {
-        printf(". keys=%zu, allocs=%zu, conns=%zu\n",
-            pogocache_count(cache, 0), xallocs(), net_nconns());
-    }
-
-}
-
-static void *ticker(void *arg) {
+static void *sigtermticker(void *arg) {
     (void)arg;
+    while (atomic_load_explicit(&sigexit, memory_order_relaxed) == 0) {
+        usleep(100000);
+    }
+    if (!atomic_load(&loaded) || !*persist) {
+        printf("# Pogocache exiting now\n");
+        exit(0);
+    }
+    if (*persist) {
+        printf("* Saving data to %s, please wait...\n", persist);
+        int ret = save(persist, true);
+        if (ret != 0) {
+            perror("# Save failed");
+            exit(1);
+        }
+        printf("# Pogocache exiting now\n");
+        exit(0);
+    }
+    return 0;
+}
+
+static void *memticker(void *arg) {
+    (void)arg;
+    char usage[64];
+    char limit[64];
+    memstr(memlimit, limit);
     while (1) {
-        tick();
+        if (atomic_load_explicit(&loaded, __ATOMIC_ACQUIRE)) {
+            size_t rss = xrss();
+            memstr(rss, usage);
+            if (memlimit < SIZE_MAX) {
+                if (verb >= 1) {
+                    printf(". Memory (usage=%s, limit=%s)\n", usage, limit);
+                }
+                if (!lowmem) {
+                    if (rss > memlimit) {
+                        atomic_store(&lowmem, true);
+                        if (verb >= 1) {
+                            printf("# Low memory mode on\n");
+                        }
+                    }
+                } else {
+                    if (rss < memlimit) {
+                        atomic_store(&lowmem, false);
+                        if (verb >= 1) {
+                            printf("# Low memory mode off\n");
+                        }
+                    }
+                }
+            }
+            // Print allocations to terminal.
+            if (usetrackallocs) {
+                printf(". keys=%zu, allocs=%zu, rss=%s conns=%zu\n",
+                    pogocache_count(cache, 0), xallocs(), usage, net_nconns());
+            }
+        }
         sleep(1);
     }
     return 0;
+}
+
+static void *autosweepticker(void *arg) {
+    (void)arg;
+    while (1) {
+        if (atomic_load_explicit(&loaded, __ATOMIC_ACQUIRE)) {
+            // Auto sweep shards to remove expired entries. Choose a random
+            // shard. If more than 10% of the shards entries are expired then
+            // immediately sweep all the shards.
+            int64_t time = sys_now();
+            struct pogocache_sweep_poll_opts opts = { 
+                .time = time, 
+                .pollsize = 20,
+            };
+            if (pogocache_sweep_poll(cache, &opts) > 0.10) {
+                struct pogocache_sweep_opts opts = { .time = time };
+                pogocache_sweep(cache, 0, 0, &opts);
+            }
+        }
+        sleep(1);
+    }
+    return 0;
+}
+
+static void start_sigtermticker(void) {
+    pthread_t th;
+    int ret = pthread_create(&th, 0, sigtermticker, 0);
+    if (ret == -1) {
+        perror("# pthread_create(sigtermticker)");
+        exit(1);
+    }
+}
+
+static void start_memticker(void) {
+    pthread_t th;
+    int ret = pthread_create(&th, 0, memticker, 0);
+    if (ret == -1) {
+        perror("# pthread_create(memticker)");
+        exit(1);
+    }
+}
+
+static void start_autosweepticker(void) {
+    pthread_t th;
+    int ret = pthread_create(&th, 0, autosweepticker, 0);
+    if (ret == -1) {
+        perror("# pthread_create(autosweepticker)");
+        exit(1);
+    }
 }
 
 static void listening(void *udata) {
@@ -392,11 +447,6 @@ static void listening(void *udata) {
     atomic_store(&loaded, true);
 }
 
-static void yield(void *udata) {
-    (void)udata;
-    sched_yield();
-}
-
 int main(int argc, char *argv[]) {
     procstart = sys_now();
 
@@ -404,6 +454,7 @@ int main(int argc, char *argv[]) {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, sigterm);
     signal(SIGTERM, sigterm);
+    assert(atomic_is_lock_free(&sigexit));
 
     // Line buffer logging so pipes will stream.
     setvbuf(stdout, 0, _IOLBF, 0);
@@ -421,8 +472,10 @@ int main(int argc, char *argv[]) {
     version = GITVERS;
     githash = GITHASH;
 
-    
-
+#ifdef __EMSCRIPTEN__
+    port = "0";
+    usecas = "yes";
+#endif
 
     if (uring_available()) {
         uring = "yes";
@@ -430,8 +483,6 @@ int main(int argc, char *argv[]) {
         uring = "no";
     }
 
-    atomic_init(&shutdownreq, 0);
-    atomic_init(&flush_delay, 0);
     atomic_init(&sweep, false);
     atomic_init(&registered, false);
 
@@ -474,8 +525,10 @@ int main(int argc, char *argv[]) {
             AFLAG("seed", seed = strtoull(flag, 0, 10))
             AFLAG("auth", auth = flag)
             AFLAG("persist", persist = flag)
-            AFLAG("noticker", noticker = flag)
+            AFLAG("noticker", (void)flag )
+            AFLAG("autosweep", autosweep = flag)
             AFLAG("warmup", warmup = flag)
+            AFLAG("allocator", allocator = flag)
 #ifndef NOOPENSSL
             // TLS flags
             AFLAG("tlsport", tlsport = flag)
@@ -492,6 +545,42 @@ int main(int argc, char *argv[]) {
     }
 
     usecolor = isatty(fileno(stdout));
+
+    // Allocator
+    useallocator = -1;
+#ifndef NOMIMALLOC
+    if (useallocator == -1 && strcmp(allocator, "mimalloc") == 0) {
+        useallocator = ALLOCATOR_MIMALLOC;
+    }
+#endif
+#ifndef NOJEMALLOC
+    if (useallocator == -1 && strcmp(allocator, "jemalloc") == 0) {
+        useallocator = ALLOCATOR_JEMALLOC;
+    }
+#endif
+    if (useallocator == -1 && strcmp(allocator, "stock") == 0) {
+        useallocator = ALLOCATOR_STOCK;
+    }
+    if (useallocator == -1) {
+        INVALID_FLAG("allocator", allocator);
+    }
+
+    // Number of threads
+    if (nthreads <= 0) {
+        nthreads = sys_nprocs();
+    } else if (nthreads > 4096) {
+        nthreads = 4096; 
+    }
+
+    // Number of shards
+    if (nshards <= 0) {
+        nshards = 4096;
+    } else if (nshards > 65536) {
+        nshards = 65536;
+    }
+
+    xmalloc_init(nthreads);
+
 
     if (strcmp(evict, "yes") == 0) {
         useevict = true;
@@ -550,6 +639,13 @@ int main(int argc, char *argv[]) {
         maxconns = 1024;
     }
 
+    if (strcmp(autosweep, "yes") == 0) {
+        useautosweep = true;
+    } else if (strcmp(usecas, "no") == 0) {
+        useautosweep = false;
+    } else {
+        INVALID_FLAG("autosweep", autosweep);
+    }
 
 #ifndef __linux__
     bool useuring = false;
@@ -587,20 +683,6 @@ int main(int argc, char *argv[]) {
         usesixpack = false;
     } else {
         INVALID_FLAG("sixpack", keysixpack);
-    }
-
-    // Threads
-    if (nthreads <= 0) {
-        nthreads = sys_nprocs();
-    } else if (nthreads > 4096) {
-        nthreads = 4096; 
-    }
-
-    if (nshards == 0) {
-        nshards = calc_nshards(nthreads);
-    }
-    if (nshards <= 0 || nshards > 65536) {
-        nshards = 65536;
     }
 
     if (loadfactor < MINLOADFACTOR_RH) {
@@ -651,18 +733,15 @@ int main(int argc, char *argv[]) {
     }
 
     struct pogocache_opts opts = {
-        .yield = yield,
         .seed = seed,
         .malloc = xmalloc,
         .free = xfree,
         .nshards = nshards,
         .loadfactor = loadfactor,
         .usecas = usecasflag,
-        .evicted = evicted,
         .allowshrink = true,
         .usethreadbatch = true,
     };
-    // opts.yield = 0;
 
     cache = pogocache_new(&opts);
     if (!cache) {
@@ -671,9 +750,10 @@ int main(int argc, char *argv[]) {
     }
 
     // Print the program details
-    printf("* Pogocache (pid: %d, arch: %s%s, version: %s, git: %s)\n",
-        getpid(), sys_arch(), sizeof(uintptr_t)==4?", mode: 32-bit":"", version,
-        githash);
+    printf("* Pogocache (pid: %d, version: %s, git: %s)\n", getpid(), 
+        version, githash);
+    printf("* Arch (arch: %s%s, libc: %s, os: %s)\n", sys_arch(), 
+        sizeof(uintptr_t)==4?", mode: 32-bit":"", sys_libc(), sys_os());
     char buf0[64], buf1[64];
     char buf2[64];
     if (memlimit < SIZE_MAX) {
@@ -682,8 +762,8 @@ int main(int argc, char *argv[]) {
     } else {
         strcpy(buf2, "unlimited");
     }
-    printf("* Memory (system: %s, max: %s, evict: %s)\n", memstr(sysmem, buf0),
-        buf2, evict);
+    printf("* Memory (system: %s, max: %s, evict: %s, allocator: %s)\n", 
+        memstr(sysmem, buf0), buf2, evict, allocator);
     printf("* Features (verbosity: %s, sixpack: %s, cas: %s, persist: %s, "
         "uring: %s)\n",
         verb==0?"normal":verb==1?"verbose":verb==2?"very":"extremely",
@@ -696,19 +776,17 @@ int main(int argc, char *argv[]) {
     printf("* Socket (tcpnodelay: %s, keepalive: %s, quickack: %s)\n",
         tcpnodelay, keepalive, quickack);
     printf("* Threads (threads: %d, queuesize: %d)\n", nthreads, queuesize);
-    printf("* Shards (shards: %d, loadfactor: %d%%)\n", nshards, loadfactor);
+    printf("* Shards (shards: %d, loadfactor: %d%%, autosweep: %s)\n", nshards, 
+        loadfactor, useautosweep?"yes":"no");
     printf("* Security (auth: %s, tlsport: %s)\n", 
         strlen(auth)>0?"enabled":"disabled", *tlsport?tlsport:"none");
-    if (strcmp(noticker,"yes") == 0) {
-        printf("# NO TICKER\n");
-    } else {
-        pthread_t th;
-        int ret = pthread_create(&th, 0, ticker, 0);
-        if (ret == -1) {
-            perror("# pthread_create(ticker)");
-            exit(1);
-        }
+
+    start_sigtermticker();
+    start_memticker();
+    if (useautosweep) {
+        start_autosweepticker();
     }
+
 #ifdef DATASETOK
     printf("# DATASETOK\n");
 #endif

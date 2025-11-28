@@ -83,7 +83,7 @@ ssize_t parse_resp_telnet(const char *bytes, size_t len, struct args *args) {
                     }
                     arg.len = 0;
                     if (ch == '\n') {
-                        break;
+                        goto newline;
                     }
                     inarg = false;
                 } else {
@@ -96,6 +96,8 @@ ssize_t parse_resp_telnet(const char *bytes, size_t len, struct args *args) {
             }
         } else {
             if (ch == '\n') {
+            newline:
+                // command complete
                 buf_clear(&arg);
                 return i+1;
             }

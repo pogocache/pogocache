@@ -5,6 +5,7 @@ import (
 	crand "crypto/rand"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 )
 
@@ -50,4 +51,21 @@ func shuffle[T any](slice []T) {
 		j := rand.Intn(i + 1)
 		slice[i], slice[j] = slice[j], slice[i]
 	}
+}
+
+func mcRawDo(mc net.Conn, packet string) (string, error) {
+	n, err := mc.Write([]byte(packet))
+	if err != nil {
+		return "", err
+	}
+	if n != len(packet) {
+		return "", io.ErrShortWrite
+	}
+	var buf [4096]byte
+	n, err = mc.Read(buf[:])
+	if err != nil {
+		return "", err
+	}
+	resp := string(buf[:n])
+	return resp, nil
 }

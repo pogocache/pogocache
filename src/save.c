@@ -91,7 +91,7 @@ static int flush(struct savectx *ctx) {
     ctx->buf.len = 0;
     ctx->nentries = 0;
     return ok ? 0 : -1;
-};
+}
 
 static int save_entry(int shard, int64_t time, const void *key, size_t keylen,
     const void *value, size_t valuelen, int64_t expires, uint32_t flags,
@@ -152,7 +152,7 @@ int save(const char *path, bool fast) {
     char *workpath = xmalloc(psize);
     snprintf(workpath, psize, "%s.%08x.pogocache.work", path, 
         (int)(seed%INT_MAX));
-    if (verb > 1) {
+    if (verb >= 2) {
         printf(". Saving to work file %s\n", workpath);
     }
     int fd = open(workpath, O_RDWR|O_CREAT, S_IRUSR|S_IRGRP|S_IROTH);

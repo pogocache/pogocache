@@ -16,6 +16,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "util.h"
+#include "xmalloc.h"
 
 // Performs a case-insenstive equality test between the byte slice 'data' and
 // a c-string. It's expected that c-string is already lowercase and 
@@ -269,26 +270,32 @@ ssize_t read_full(int fd, void *data, size_t len) {
 size_t u64toa(uint64_t x, uint8_t *data) {
     if (x < 10) {
         data[0] = '0'+x;
+        data[1] = '\0';
         return 1;
     }
-    int i = 0;
+    size_t i = 0;
     do {
         data[i++] = '0' + x % 10;
     } while ((x /= 10) > 0);
     // reverse the characters
-    for (int j = 0, k = i-1; j < k; j++, k--) {
+    for (size_t j = 0, k = i-1; j < k; j++, k--) {
         uint8_t ch = data[j];
         data[j] = data[k];
         data[k] = ch;
     }
+    data[i] = '\0';
     return i;
 }
 
 size_t i64toa(int64_t x, uint8_t *data) {
     if (x < 0) {
+        if (x == INT64_MIN) {
+            memcpy(data, "-9223372036854775808", 21);
+            return 20;
+        }
         data[0] = '-';
         data++;
-        return u64toa(x * -1, data) + 1;
+        return u64toa(-x, data) + 1;
     }
     return u64toa(x, data);
 }
@@ -391,4 +398,75 @@ void binprint(const void *bin, size_t len) {
             printf("%c", c);
         }
     }
+}
+
+// pattern matcher
+// see https://github.com/tidwall/match.c
+bool match(const char *pat, size_t plen, const char *str, size_t slen,
+    int depth)
+{
+    while (plen > 0) {
+        if (pat[0] == '\\') {
+            if (plen == 1) return false;
+            pat++; plen--; 
+        } else if (pat[0] == '*') {
+            if (plen == 1) return true;
+            if (pat[1] == '*') {
+                pat++; plen--;
+                continue;
+            }
+            if (depth == 127) {
+                return false;
+            }
+            if (match(pat+1, plen-1, str, slen, depth+1)) return true;
+            if (slen == 0) return false;
+            str++; slen--;
+            continue;
+        }
+        if (slen == 0) return false;
+        if (pat[0] != '?' && str[0] != pat[0]) return false;
+        pat++; plen--;
+        str++; slen--;
+    }
+    return slen == 0 && plen == 0;
+}
+
+// Convert an arg to a c-string. 
+// Returns newly allocated string that must be freed using xfree in the future.
+// Returns null if the idx is out of bounds or there argument contains a null
+// character.
+char *arg_cstr(struct args *args, size_t idx) {
+    if (idx >= args->len) {
+        return 0;
+    }
+    char *cstr = xmalloc(args->bufs[idx].len+1);
+    memcpy(cstr, args->bufs[idx].data, args->bufs[idx].len);
+    cstr[ args->bufs[idx].len] = '\0';
+    if (strlen(cstr) != args->bufs[idx].len) {
+        xfree(cstr);
+        return 0;
+    }
+    return cstr;
+}
+
+// Create a copy of a c-string
+// Returns newly allocated string that must be freed using xfree in the future.
+// Returns null if the input is null.
+char *cstr_copy(const char *cstr) {
+    if (!cstr) {
+        return 0;
+    }
+    size_t len = strlen(cstr);
+    char *copy = xmalloc(len+1);
+    memcpy(copy, cstr, len+1);
+    return copy;
+}
+
+// Abbreviated version of the th64 hash function made for hashing a uint64.
+// This basically performs a mix on two uint64s, data and seed.
+// https://github.com/tidwall/th64
+uint64_t th64_u64(uint64_t data, uint64_t seed) {
+    uint64_t r=0x14020a57acced8b7,x=data,h=seed;
+    x*=r,x=x<<31|x>>33,h=h*r^x,h=h<<31|h>>33;
+    return(h=h*r+8,h^=h>>31,h*=r,h^=h>>31,h*=r,h^=h>>31,h*=r,h);
 }

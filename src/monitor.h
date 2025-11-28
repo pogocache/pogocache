@@ -7,22 +7,14 @@
 //
 // For alternative licensing options or general questions, please contact
 // us at licensing@polypointlabs.com.
-#ifndef XMALLOC_H
-#define XMALLOC_H
+#ifndef MONITOR_H
+#define MONITOR_H
 
-#include <stddef.h>
-#include <stdbool.h>
+#include "conn.h"
+#include "args.h"
 
-#define ALLOCATOR_STOCK     0
-#define ALLOCATOR_MIMALLOC  1
-#define ALLOCATOR_JEMALLOC  2
-
-void xmalloc_init(int nthreads);
-size_t xallocs(void);
-void *xmalloc(size_t size);
-void *xrealloc(void *ptr, size_t size);
-void xfree(void *ptr);
-void xpurge(void);
-size_t xrss(void);
+void monitor_start(struct conn *conn);
+void monitor_stop(struct conn *conn);
+void monitor_cmd(int64_t now, int db, const char *addr, struct args *args);
 
 #endif

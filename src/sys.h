@@ -19,6 +19,7 @@ uint64_t sys_seed(void);
 int64_t sys_now(void);
 int64_t sys_unixnow(void);
 const char *sys_arch(void);
+const char *sys_libc(void);
 void sys_genuseid(char useid[16]);
 
 struct sys_meminfo {
@@ -28,5 +29,6 @@ struct sys_meminfo {
 
 void sys_getmeminfo(struct sys_meminfo *info); 
 uint64_t sys_threadid(void);
+const char *sys_os(void);
 
 #endif

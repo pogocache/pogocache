@@ -37,6 +37,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/epoll.h>
+#elif defined(__EMSCRIPTEN__)
+#include <emscripten/html5.h>
 #else
 #include <sys/event.h>
 #endif
@@ -53,23 +55,28 @@
 
 extern const int verb;
 
-static int setnonblock(int fd) {
+int setnonblock(int fd, bool set) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
         return -1;
     }
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (set) {
+        flags |= O_NONBLOCK;
+    } else {;
+        flags &= ~O_NONBLOCK;
+    }
+    return fcntl(fd, F_SETFL, flags);
 }
 
 static int settcpnodelay(int fd, bool nodelay) {
     int val = nodelay;
-    return setsockopt(fd, SOL_SOCKET, TCP_NODELAY, &val, sizeof(val)) == 0;
+    return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
 }
 
 static int setquickack(int fd, bool quickack) {
 #if defined(__linux__)
     int val = quickack;
-    return setsockopt(fd, SOL_SOCKET, TCP_QUICKACK, &val, sizeof(val)) == 0;
+    return setsockopt(fd, SOL_SOCKET, TCP_QUICKACK, &val, sizeof(val));
 #else
     (void)fd, (void)quickack;
     return 0;
@@ -105,6 +112,8 @@ static int setkeepalive(int fd, bool keepalive) {
 
 #ifdef __linux__
 typedef struct epoll_event event_t;
+#elif defined(__EMSCRIPTEN__)
+typedef int event_t;
 #else
 typedef struct kevent event_t;
 #endif
@@ -112,6 +121,9 @@ typedef struct kevent event_t;
 static int event_fd(event_t *ev) {
 #ifdef __linux__
     return ev->data.fd;
+#elif defined(__EMSCRIPTEN__)
+    (void)ev;
+    return 0;
 #else
     return ev->ident;
 #endif
@@ -123,6 +135,10 @@ static int getevents(int fd, event_t evs[], int nevs, bool wait_forever,
     if (wait_forever) {
 #ifdef __linux__
         return epoll_wait(fd, evs, nevs, -1);
+#elif defined(__EMSCRIPTEN__)
+        (void)fd, (void)evs, (void)nevs;
+        errno = EPERM;
+        return -1;
 #else
         return kevent(fd, NULL, 0, evs, nevs, 0);
 #endif
@@ -133,6 +149,9 @@ static int getevents(int fd, event_t evs[], int nevs, bool wait_forever,
 #ifdef __linux__
         timeout = timeout / 1000000;
         return epoll_wait(fd, evs, nevs, timeout);
+#elif defined(__EMSCRIPTEN__)
+        errno = EPERM;
+        return -1;
 #else
         struct timespec timespec = { .tv_nsec = timeout };
         return kevent(fd, NULL, 0, evs, nevs, &timespec);
@@ -146,6 +165,10 @@ static int addread(int qfd, int fd) {
     ev.events = EPOLLIN | EPOLLEXCLUSIVE;
     ev.data.fd = fd;
     return epoll_ctl(qfd, EPOLL_CTL_ADD, fd, &ev);
+#elif defined(__EMSCRIPTEN__)
+    (void)qfd, (void)fd;
+    errno = EPERM;
+    return -1;
 #else
     struct kevent ev={.filter=EVFILT_READ,.flags=EV_ADD,.ident=(fd)};
     return kevent(qfd, &ev, 1, NULL, 0, NULL);
@@ -158,6 +181,10 @@ static int delread(int qfd, int fd) {
     ev.events = EPOLLIN;
     ev.data.fd = fd;
     return epoll_ctl(qfd, EPOLL_CTL_DEL, fd, &ev);
+#elif defined(__EMSCRIPTEN__)
+    (void)qfd, (void)fd;
+    errno = EPERM;
+    return -1;
 #else
     struct kevent ev={.filter=EVFILT_READ,.flags=EV_DELETE,.ident=(fd)};
     return kevent(qfd, &ev, 1, NULL, 0, NULL);
@@ -170,6 +197,10 @@ static int addwrite(int qfd, int fd) {
     ev.events = EPOLLOUT;
     ev.data.fd = fd;
     return epoll_ctl(qfd, EPOLL_CTL_ADD, fd, &ev);
+#elif defined(__EMSCRIPTEN__)
+    (void)qfd, (void)fd;
+    errno = EPERM;
+    return -1;
 #else
     struct kevent ev={.filter=EVFILT_WRITE,.flags=EV_ADD,.ident=(fd)};
     return kevent(qfd, &ev, 1, NULL, 0, NULL);
@@ -182,6 +213,10 @@ static int delwrite(int qfd, int fd) {
     ev.events = EPOLLOUT;
     ev.data.fd = fd;
     return epoll_ctl(qfd, EPOLL_CTL_DEL, fd, &ev);
+#elif defined(__EMSCRIPTEN__)
+    (void)qfd, (void)fd;
+    errno = EPERM;
+    return -1;
 #else
     struct kevent ev={.filter=EVFILT_WRITE,.flags=EV_DELETE,.ident=(fd)};
     return kevent(qfd, &ev, 1, NULL, 0, NULL);
@@ -191,6 +226,9 @@ static int delwrite(int qfd, int fd) {
 static int evqueue(void) {
 #ifdef __linux__
     return epoll_create1(0);
+#elif defined(__EMSCRIPTEN__)
+    errno = EPERM;
+    return -1;
 #else
     return kqueue();
 #endif
@@ -215,6 +253,7 @@ struct net_conn {
     char *out;
     size_t outlen;
     size_t outcap;
+    char *addr;
     struct bgworkctx *bgctx;
     struct qthreadctx *ctx;
     unsigned stat_cmd_get;
@@ -233,9 +272,8 @@ static struct net_conn *conn_new(int fd, struct qthreadctx *ctx) {
 
 static void conn_free(struct net_conn *conn) {
     if (conn) {
-        if (conn->out) {
-            xfree(conn->out);
-        }
+        xfree(conn->out);
+        xfree(conn->addr);
         xfree(conn);
     }
 }
@@ -546,7 +584,7 @@ static void qaccept(struct qthreadctx *ctx) {
                 if (fd == -1) {
                     continue;
                 }
-                if (setnonblock(fd) == -1) {
+                if (setnonblock(fd, true) == -1) {
                     close(fd);
                     continue;
                 }
@@ -935,12 +973,14 @@ static int listen_tcp(const char *host, const char *port, bool reuseport,
             abort();
         }
     }
+#ifndef __EMSCRIPTEN__
     ret = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &(int){1},sizeof(int));
     if (ret == -1) {
         perror("# setsockopt(reuseaddr)");
         abort();
     }
-    ret = setnonblock(fd);
+#endif
+    ret = setnonblock(fd, true);
     if (ret == -1) {
         perror("# setnonblock");
         abort();
@@ -972,7 +1012,7 @@ static int listen_unixsock(const char *unixsock, int backlog) {
     memset(&unaddr, 0, sizeof(struct sockaddr_un));
     unaddr.sun_family = AF_UNIX;
     strncpy(unaddr.sun_path, unixsock, sizeof(unaddr.sun_path) - 1);
-    int ret = setnonblock(fd);
+    int ret = setnonblock(fd, true);
     if (ret == -1) {
         perror("# setnonblock");
         abort();
@@ -1045,7 +1085,7 @@ static void warmupunix(const char *unixsock, int nsocks) {
             close(socks[i]);
         }
     }
-    if (verb > 1) {
+    if (verb >= 2) {
         printf(". Warmup unix socket (%d/%d)\n", x, nsocks);
     }
     xfree(socks);
@@ -1093,7 +1133,7 @@ static void warmuptcp(const char *host, const char *port, int nsocks) {
             close(socks[i]);
         }
     }
-    if (verb > 1) {
+    if (verb >= 2) {
         printf(". Warmup tcp (%d/%d)\n", x, nsocks);
     }
     xfree(socks);
@@ -1108,16 +1148,39 @@ static void *thwarmup(void *arg) {
     return 0;
 }
 
+#ifdef __EMSCRIPTEN__
+static struct net_opts *exec_opts = 0;
+static void emscripten_start(struct net_opts *opts) {
+    exec_opts = opts;
+    opts->listening(opts->udata);
+}
+char *exec_command(const char *command) {
+    struct net_conn *conn = conn_new(0, 0);
+    exec_opts->opened(conn, exec_opts->udata);
+    exec_opts->data(conn, command, strlen(command), exec_opts->udata);
+    char *ptr = xmalloc(conn->outlen+1);
+    memcpy(ptr, conn->out, conn->outlen);
+    ptr[conn->outlen] = '\0';
+    exec_opts->closed(conn, exec_opts->udata);
+    conn_free(conn);
+    return ptr;
+}
+#endif
+
 void net_main(struct net_opts *opts) {
-    (void)delread;
     int sfd[3] = {
         listen_tcp(opts->host, opts->port, opts->reuseport, opts->backlog),
         listen_unixsock(opts->unixsock, opts->backlog),
         listen_tcp(opts->host, opts->tlsport, opts->reuseport, opts->backlog),
     };
     if (!sfd[0] && !sfd[1] && !sfd[2]) {
+#ifdef __EMSCRIPTEN__
+        emscripten_start(opts);
+        return;
+#else
         printf("# No listeners provided\n");
         abort();
+#endif
     }
     opts->listening(opts->udata);
     struct qthreadctx *ctxs = xmalloc(sizeof(struct qthreadctx)*opts->nthreads);
@@ -1196,11 +1259,23 @@ static void *bgwork(void *arg) {
 bool net_conn_bgwork(struct net_conn *conn, void (*work)(void *udata), 
     void (*done)(struct net_conn *conn, void *udata), void *udata)
 {
+#ifdef __EMSCRIPTEN__
+    // run in foreground
+    work(udata);
+    done(conn, udata);
+    return true;
+#endif
     if (conn->bgctx || conn->closed) {
         return false;
     }
+    if (!conn->closed) {
+        flush_conn(conn, 0);
+    }
+    if (conn->closed) {
+        return false;
+    }
     struct qthreadctx *ctx = conn->ctx;
-    int ret = delread(ctx->qfd, conn->fd);
+    int ret = delread(ctx->qfd, conn->fd);    
     assert(ret == 0); (void)ret;
     conn->bgctx = xmalloc(sizeof(struct bgworkctx));
     memset(conn->bgctx, 0, sizeof(struct bgworkctx));
@@ -1244,4 +1319,59 @@ void net_stat_get_misses_incr(struct net_conn *conn) {
 
 bool net_conn_istls(struct net_conn *conn) {
     return conn->tls != 0;
+}
+
+int net_conn_setnonblock(struct net_conn *conn, bool set) {
+    return setnonblock(conn->fd, set);
+}
+
+// only use when full detached
+ssize_t net_conn_read(struct net_conn *conn, char *bytes, size_t nbytes) {
+    return tls_read(conn->tls, conn->fd, bytes, nbytes);
+}
+
+ssize_t net_conn_write(struct net_conn *conn, const char *bytes, size_t nbytes){
+    return tls_write(conn->tls, conn->fd, bytes, nbytes);
+}
+
+
+// returns address for net_conn, allocates a new 
+const char *net_conn_addr(struct net_conn *conn) {
+#ifdef __EMSCRIPTEN__
+    return "wasm";
+#endif
+    if (conn->addr) {
+        return conn->addr;
+    }
+    char addrstr[512];
+    struct sockaddr_storage addr;
+    socklen_t addr_len = sizeof(addr);
+    if (getpeername(conn->fd, (struct sockaddr *)&addr, &addr_len) == -1) {
+        strcpy(addrstr, "");
+        goto done;
+    }
+    char ipstr[INET6_ADDRSTRLEN];
+    int port;
+    if (addr.ss_family == AF_INET) {
+        struct sockaddr_in *s = (struct sockaddr_in *)&addr;
+        inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof(ipstr));
+        port = ntohs(s->sin_port);
+    } else if (addr.ss_family == AF_INET6) {
+        struct sockaddr_in6 *s = (struct sockaddr_in6 *)&addr;
+        inet_ntop(AF_INET6, &s->sin6_addr, ipstr, sizeof(ipstr));
+        port = ntohs(s->sin6_port);
+    } else if (addr.ss_family == AF_UNIX) {
+        strcpy(addrstr, "unixsocket");
+        goto done;
+    } else {
+        strcpy(addrstr, "");
+        goto done;
+    }
+    snprintf(addrstr, sizeof(addrstr), "%s:%d", ipstr, port);
+done:
+    (void)0;
+    size_t len = strlen(addrstr);
+    conn->addr = xmalloc(len+1);
+    memcpy(conn->addr, addrstr, len+1);
+    return conn->addr;
 }

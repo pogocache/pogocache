@@ -31,6 +31,8 @@
 #include "xmalloc.h"
 #include "pogocache.h"
 #include "stats.h"
+#include "monitor.h"
+#include "tls.h"
 
 // from main.c
 extern const uint64_t seed;
@@ -42,13 +44,13 @@ extern const char *persist;
 extern const int nthreads;
 extern const char *version;
 extern const char *githash;
-extern atomic_int_fast64_t flush_delay;
 extern atomic_bool sweep;
 extern atomic_bool lowmem;
 extern const int nshards;
 extern const int narenas;
 extern const int64_t procstart;
 extern const int maxconns;
+extern atomic_bool monitoring;
 
 extern struct pogocache *cache;
 
@@ -317,51 +319,55 @@ static void cmdSETEX(struct conn *conn, struct args *args) {
         0);
 }
 
+enum get_entry_kind {
+    KIND_GET, KIND_MGET, KIND_MGETS, 
+};
+
 struct get_entry_context {
     struct conn *conn;
-    bool cas;
-    bool mget;
+    enum get_entry_kind kind;
 };
 
 static void get_entry(int shard, int64_t time, const void *key, size_t keylen,
     const void *val, size_t vallen, int64_t expires, uint32_t flags,
     uint64_t cas, struct pogocache_update **update, void *udata)
 {
-    (void)key, (void)keylen, (void)cas;
     (void)shard, (void)time, (void)expires, (void)flags, (void)update;
     struct get_entry_context *ctx = udata;
-    int x;
     uint8_t buf[24];
-    size_t n;
     switch (conn_proto(ctx->conn)) {
     case PROTO_POSTGRES:;
+        char flagsbuf[24];
+        size_t flagsn = snprintf(flagsbuf, sizeof(flagsbuf), "%" PRIu32, flags);
         char casbuf[24];
-        if (ctx->cas) {
-            x = 1;
-            n = snprintf(casbuf, sizeof(casbuf), "%" PRIu64, cas);
-        } else {
-            x = 0;
-            casbuf[0] = '\0';
-            n = 0;
-        }
-        if (ctx->mget) {
-            pg_write_row_data(ctx->conn, (const char*[]){ key, val, casbuf }, 
-                (size_t[]){ keylen, vallen, n }, 2+x);
-        } else {
-            pg_write_row_data(ctx->conn, (const char*[]){ val, casbuf }, 
-                (size_t[]){ vallen, n }, 1+x);
+        size_t casn = snprintf(casbuf, sizeof(casbuf), "%" PRIu64, cas);
+        switch (ctx->kind) {
+        case KIND_GET:
+            pg_write_row_data(ctx->conn, (const char*[]){ val, }, 
+                (size_t[]){ vallen }, 1);
+            break;
+        case KIND_MGET:
+            pg_write_row_data(ctx->conn, (const char*[]){ key, val }, 
+                (size_t[]){ keylen, vallen }, 2);
+            break;
+        case KIND_MGETS:
+            pg_write_row_data(ctx->conn, 
+                (const char*[]){ key, flagsbuf, casbuf, val }, 
+                (size_t[]){ keylen, flagsn, casn, vallen }, 
+                4);
+            break;
         }
         break;
     case PROTO_MEMCACHE:
         conn_write_raw(ctx->conn, "VALUE ", 6);
         conn_write_raw(ctx->conn, key, keylen);
-        n = u64toa(flags, buf);
+        size_t n = u64toa(flags, buf);
         conn_write_raw(ctx->conn, " ", 1);
         conn_write_raw(ctx->conn, buf, n);
         n = u64toa(vallen, buf);
         conn_write_raw(ctx->conn, " ", 1);
         conn_write_raw(ctx->conn, buf, n);
-        if (ctx->cas) {
+        if (ctx->kind == KIND_MGETS) {
             n = u64toa(cas, buf);
             conn_write_raw(ctx->conn, " ", 1);
             conn_write_raw(ctx->conn, buf, n);
@@ -374,11 +380,13 @@ static void get_entry(int shard, int64_t time, const void *key, size_t keylen,
         conn_write_http(ctx->conn, 200, "OK", val, vallen);
         break;
     default:
-        if (ctx->cas) {
-            conn_write_array(ctx->conn, 2);
+        if (ctx->kind == KIND_MGETS) {
+            conn_write_array(ctx->conn, 3);
+            conn_write_uint(ctx->conn, flags);
             conn_write_uint(ctx->conn, cas);
         }
         conn_write_bulk(ctx->conn, val, vallen);
+        break;
     }
 }
 
@@ -433,7 +441,7 @@ static void cmdGET(struct conn *conn, struct args *args) {
     }
 }
 
-// MGET key [key...]
+// MGET(S) key [key...]
 static void cmdMGET(struct conn *conn, struct args *args) {
     if (args->len < 2) {
         conn_write_error(conn, ERR_WRONG_NUM_ARGS);
@@ -442,8 +450,7 @@ static void cmdMGET(struct conn *conn, struct args *args) {
     int64_t now = sys_now();
     struct get_entry_context ctx = { 
         .conn = conn,
-        .mget = true,
-        .cas = argeq(args, 0, "mgets"),
+        .kind = argeq(args, 0, "mgets") ? KIND_MGETS : KIND_MGET,
     };
     struct pogocache_load_opts opts = {
         .time = now,
@@ -453,8 +460,13 @@ static void cmdMGET(struct conn *conn, struct args *args) {
     int count = 0;
     int proto = conn_proto(conn);
     if (proto == PROTO_POSTGRES) {
-        pg_write_row_desc(conn, (const char*[]){ "key", "value", "cas" }, 
-            2+(ctx.cas?1:0));
+        if (ctx.kind == KIND_MGETS) {
+            const char *rows[] = {"key", "flags", "cas", "value"};
+            pg_write_row_desc(conn, rows, 4);
+        } else {
+            const char *rows[] = {"key", "value"};
+            pg_write_row_desc(conn, rows, 2);
+        }
     } else if (proto == PROTO_RESP) {
         conn_write_array(conn, args->len-1);
     }
@@ -493,37 +505,6 @@ static void keys_ctx_free(struct keys_ctx *ctx) {
     xfree(ctx->pattern);
     buf_clear(&ctx->buf);
     xfree(ctx);
-}
-
-// pattern matcher
-// see https://github.com/tidwall/match.c
-static bool match(const char *pat, size_t plen, const char *str, size_t slen,
-    int depth)
-{
-    if (depth == 128) {
-        return false;
-    }
-    while (plen > 0) {
-        if (pat[0] == '\\') {
-            if (plen == 1) return false;
-            pat++; plen--; 
-        } else if (pat[0] == '*') {
-            if (plen == 1) return true;
-            if (pat[1] == '*') {
-                pat++; plen--;
-                continue;
-            }
-            if (match(pat+1, plen-1, str, slen, depth+1)) return true;
-            if (slen == 0) return false;
-            str++; slen--;
-            continue;
-        }
-        if (slen == 0) return false;
-        if (pat[0] != '?' && str[0] != pat[0]) return false;
-        pat++; plen--;
-        str++; slen--;
-    }
-    return slen == 0 && plen == 0;
 }
 
 static int keys_entry(int shard, int64_t time, const void *key, size_t keylen,
@@ -603,6 +584,33 @@ static void cmdKEYS(struct conn *conn, struct args *args) {
     }
 }
 
+// SELECT 0
+// This is an undocumented RESP only command that exists in order to provide
+// compatibility for certain integrations that need it.
+static void cmdSELECT(struct conn *conn, struct args *args) {
+    if (conn_proto(conn) != PROTO_RESP) {
+        char msg[64];
+        snprintf(msg, 64, "ERR unknown command '%.*s'", 
+            (int)args->bufs[0].len, args->bufs[0].data);
+        conn_write_error(conn, msg);
+        return;
+    }
+    if (args->len != 2) {
+        conn_write_error(conn, ERR_WRONG_NUM_ARGS);
+        return;
+    }
+    int64_t db = 0;
+    bool ok = parse_i64(args->bufs[1].data, args->bufs[1].len, &db);
+    const bool out_of_range = (ok && db > 0);
+    ok = (ok && !out_of_range);
+    if (!ok) {
+        conn_write_error(conn, (out_of_range) ? ERR_INDEX_OUT_OF_RANGE : 
+            ERR_INVALID_INTEGER);
+        return;
+    }
+    conn_write_string(conn, "OK");
+}
+
 static void cmdDEL(struct conn *conn, struct args *args) {
     if (args->len < 2) {
         conn_write_error(conn, ERR_WRONG_NUM_ARGS);
@@ -663,6 +671,9 @@ static void cmdDBSIZE(struct conn *conn, struct args *args) {
 }
 
 struct flushctx { 
+    int64_t delay;
+    bool fast;
+    const char *cmdname;
     pthread_t th;
     int64_t time;
     int start;
@@ -679,9 +690,7 @@ static void *thflush(void *arg) {
     return 0;
 }
 
-static void bgflushwork(void *udata) {
-    (void)udata;
-    atomic_store(&flush_delay, 0);
+static void flushfast(void) {
     int64_t now = sys_now();
     int nprocs = sys_nprocs();
     if (nprocs > nshards) {
@@ -718,25 +727,61 @@ static void bgflushwork(void *udata) {
     xfree(ctxs);
 }
 
-static void bgflushdone(struct conn *conn, void *udata) {
-    const char *cmdname = udata;
+static void flush_work(void *udata) {
+    struct flushctx *ctx = udata;
+    int64_t start = sys_now();
+    if (verb > 0) {
+        printf(". flush started\n");
+    }
+    stat_cmd_flush_incr(0);
+    if (ctx->fast) {
+        flushfast();
+    } else {
+        struct pogocache_clear_opts opts = { 
+            .time = start,
+            .deferfree = true, // less thread blocking when defered
+        };
+        pogocache_clear(cache, &opts);
+    }
+    double elapsed = (sys_now()-start)/1e9;
+    if (verb > 0) {
+        printf(". flush finished in %.2fs\n", elapsed);
+    }
+}
+
+static void flush_done(struct conn *conn, void *udata) {
+    struct flushctx *ctx = udata;
     if (conn_proto(conn) == PROTO_POSTGRES) {
-        pg_write_completef(conn, "%s SYNC", cmdname);
+        pg_write_completef(conn, "%s SYNC", ctx->cmdname);
         pg_write_ready(conn, 'I');
     } else if (conn_proto(conn) == PROTO_MEMCACHE) {
         conn_write_raw_cstr(conn, "OK\r\n");
     } else {
         conn_write_string(conn, "OK");
     }
+    xfree(ctx);
 }
 
-// FLUSHALL [SYNC|ASYNC] [DELAY <seconds>]
+static void *thflush0(void *arg) {
+    struct flushctx *ctx = arg;
+    if (ctx->delay > 0) {
+        printf(". flush scheduled in %lld seconds\n", (long long)ctx->delay);
+        sleep(ctx->delay);
+    }
+    flush_work(ctx);
+    xfree(ctx);
+    return 0;
+}
+
+// FLUSHALL [SYNC|ASYNC] [FAST] [DELAY <seconds>]
+// FLUSHDB
+// FLUSH
 static void cmdFLUSHALL(struct conn *conn, struct args *args) {
     const char *cmdname = 
         args_eq(args, 0, "flush") ? "FLUSH" :
         args_eq(args, 0, "flushdb") ? "FLUSHDB" :
         "FLUSHALL";
-    stat_cmd_flush_incr(conn);
+    bool fast = false;
     bool async = false;
     int64_t delay = 0;
     for (size_t i = 1; i < args->len; i++) {
@@ -744,31 +789,43 @@ static void cmdFLUSHALL(struct conn *conn, struct args *args) {
             async = true;
         } else if (argeq(args, i, "sync")) {
             async = false;
+        } else if (argeq(args, i, "fast")) {
+            fast = true;
         } else if (argeq(args, i, "delay")) {
             i++;
             if (i == args->len) {
-                goto err_syntax;
+                conn_write_error(conn, ERR_SYNTAX_ERROR);
+                return;
             }
             bool ok = parse_i64(args->bufs[i].data, args->bufs[i].len, &delay);
-            if (!ok) {
-                conn_write_error(conn, "ERR invalid exptime argument");
+            if (!ok || delay < 0 || delay > 31536000) {
+                conn_write_error(conn, "ERR invalid delay argument");
                 return;
             }
             if (delay > 0) {
                 async = true;
+            } else {
+                delay = 0;
             }
         } else {
-            goto err_syntax;
+            conn_write_error(conn, ERR_SYNTAX_ERROR);
+            return;
         }
     }
+    struct flushctx *ctx = xmalloc(sizeof(struct flushctx));
+    memset(ctx, 0, sizeof(struct flushctx));
+    ctx->cmdname = cmdname;
+    ctx->fast = fast;
+    ctx->delay = delay;
     if (async) {
-        if (delay < 0) {
-            delay = 0;
+        pthread_t th;
+        int ret = pthread_create(&th, 0, thflush0, ctx);
+        if (ret == -1) {
+            xfree(ctx);
+            conn_write_error(conn, "ERR failed to do work");
+            return;
         }
-        delay = int64_mul_clamp(delay, SECOND);
-        delay = int64_add_clamp(delay, sys_now());
-        atomic_store(&flush_delay, delay);
-        // ticker will check the delay and perform the flush
+        pthread_detach(th);
         if (conn_proto(conn) == PROTO_POSTGRES) {
             pg_write_completef(conn, "%s ASYNC", cmdname);
             pg_write_ready(conn, 'I');
@@ -779,12 +836,12 @@ static void cmdFLUSHALL(struct conn *conn, struct args *args) {
         }
     } else {
         // Flush database is slow. cmdname is static and thread safe
-        conn_bgwork(conn, bgflushwork, bgflushdone, (void*)cmdname);
+        if (!conn_bgwork(conn, flush_work, flush_done, ctx)) {
+            conn_write_error(conn, "ERR failed to do work");
+            xfree(ctx);
+        }
         return;
     }
-    return;
-err_syntax:
-    conn_write_error(conn, ERR_SYNTAX_ERROR);
     return;
 }
 
@@ -981,11 +1038,22 @@ static void cmdEXPIRE(struct conn *conn, struct args *args) {
     };
     int status = pogocache_load(cache, key, keylen, &lopts);
     int ret = status == POGOCACHE_FOUND;
-    if (conn_proto(conn) == PROTO_POSTGRES) {
+    int proto = conn_proto(conn);
+    switch (proto) {
+    case PROTO_POSTGRES:
         pg_write_completef(conn, "EXPIRE %d", ret);
         pg_write_ready(conn, 'I');
-    } else {
+        break;
+    case PROTO_MEMCACHE:
+        if (ret) {
+            conn_write_raw_cstr(conn, "TOUCHED\r\n");
+        } else {
+            conn_write_raw_cstr(conn, "NOT_FOUND\r\n");
+        }
+        break;
+    default:
         conn_write_int(conn, ret);
+        break;
     }
 }
 
@@ -1018,56 +1086,138 @@ static void cmdEXISTS(struct conn *conn, struct args *args) {
     }
 }
 
+struct sweepctx {
+    bool fast;
+    pthread_t th;
+    int64_t time;
+    int start;
+    int count;
+    size_t swept;
+    size_t kept;
+};
+
+static void *thsweep(void *arg) {
+    struct sweepctx *ctx = arg;
+    struct pogocache_sweep_opts opts = { .time = sys_now(), .oneshard = true };
+    for (int i = 0; i < ctx->count; i++) {
+        opts.oneshardidx = i+ctx->start;
+        size_t swept, kept;
+        pogocache_sweep(cache, &swept, &kept, &opts);
+        ctx->swept += swept;
+        ctx->kept += kept;
+    }
+    return 0;
+}
+
+static void sweepfast(size_t *swept, size_t *kept) {
+    size_t sweptc = 0;
+    size_t keptc = 0;
+    int64_t now = sys_now();
+    int nprocs = sys_nprocs();
+    if (nprocs > nshards) {
+        nprocs = nshards;
+    }
+    struct sweepctx *ctxs = xmalloc(nprocs*sizeof(struct sweepctx));
+    memset(ctxs, 0, nprocs*sizeof(struct sweepctx));
+    int start = 0;
+    for (int i = 0; i < nprocs; i++) {
+        struct sweepctx *ctx = &ctxs[i];
+        ctx->fast = true;
+        ctx->start = start;
+        ctx->count = nshards/nprocs;
+        ctx->time = now;
+        if (i == nprocs-1) {
+            ctx->count = nshards-ctx->start;
+        }
+        if (pthread_create(&ctx->th, 0, thsweep, ctx) == -1) {
+            ctx->th = 0;
+        }
+        start += ctx->count;
+    }
+    for (int i = 0; i < nprocs; i++) {
+        struct sweepctx *ctx = &ctxs[i];
+        if (ctx->th == 0) {
+            thsweep(ctx);
+        }
+    }
+    for (int i = 0; i < nprocs; i++) {
+        struct sweepctx *ctx = &ctxs[i];
+        if (ctx->th != 0) {
+            pthread_join(ctx->th, 0);
+        }
+        sweptc += ctx->swept;
+        keptc += ctx->kept;
+    }
+    *swept = sweptc;
+    *kept = keptc;
+    xfree(ctxs);
+}
+
 static void sweep_work(void *udata) {
-    (void)udata;
+    struct sweepctx *ctx = udata;
     int64_t start = sys_now();
     size_t swept;
     size_t kept;
-    struct pogocache_sweep_opts opts = {
-        .time = start,
-    };
-    printf(". sweep started\n");
-    pogocache_sweep(cache, &swept, &kept, &opts);
+    if (verb > 0) {
+        printf(". sweep started\n");
+    }
+    if (ctx->fast) {
+        sweepfast(&swept, &kept);
+    } else {
+        struct pogocache_sweep_opts opts = { .time = start };
+        pogocache_sweep(cache, &swept, &kept, &opts);
+    }
     double elapsed = (sys_now()-start)/1e9;
-    printf(". sweep finished in %.2fs, (swept=%zu, kept=%zu) \n", elapsed, 
-        swept, kept);
+    if (verb > 0) {
+        printf(". sweep finished in %.2fs, (swept=%zu, kept=%zu) \n", elapsed, 
+            swept, kept);
+    }
 }
 
 static void sweep_done(struct conn *conn, void *udata) {
-    (void)udata;
+    struct sweepctx *ctx = udata;
     if (conn_proto(conn) == PROTO_POSTGRES) {
         pg_write_completef(conn, "SWEEP SYNC");
         pg_write_ready(conn, 'I');
     } else {
         conn_write_string(conn, "OK");
     }
+    xfree(ctx);
 }
 
-static void *thsweep(void *arg) {
-    (void)arg;
-    sweep_work(0);
+static void *thsweep0(void *arg) {
+    struct sweepctx *ctx = arg;
+    sweep_work(ctx);
+    xfree(ctx);
     return 0;
 }
 
-// SWEEP [ASYNC]
+// SWEEP [ASYNC] [FAST]
 static void cmdSWEEP(struct conn *conn, struct args *args) {
     if (args->len > 2) {
         conn_write_error(conn, ERR_WRONG_NUM_ARGS);
         return;
     }
+    bool fast = false;
     bool async = false;
-    if (args->len == 2) {
-        if (argeq(args, 1, "async")) {
+    for (size_t i = 1; i < args->len; i++) {
+        if (argeq(args, i, "async")) {
             async = true;
+        } else if (argeq(args, i, "fast")) {
+            fast = true;
         } else {
             conn_write_error(conn, ERR_SYNTAX_ERROR);
             return;
         }
     }
+    struct sweepctx *ctx = xmalloc(sizeof(struct sweepctx));
+    memset(ctx, 0, sizeof(struct sweepctx));
+    ctx->fast = fast;
     if (async) {
         pthread_t th;
-        int ret = pthread_create(&th, 0, thsweep, 0);
+        int ret = pthread_create(&th, 0, thsweep0, ctx);
         if (ret == -1) {
+            xfree(ctx);
             conn_write_error(conn, "ERR failed to do work");
             return;
         }
@@ -1079,7 +1229,8 @@ static void cmdSWEEP(struct conn *conn, struct args *args) {
             conn_write_string(conn, "OK");
         }
     } else {
-        if (!conn_bgwork(conn, sweep_work, sweep_done, 0)) {
+        if (!conn_bgwork(conn, sweep_work, sweep_done, ctx)) {
+            xfree(ctx);
             conn_write_error(conn, "ERR failed to do work");
         }
     }
@@ -1338,6 +1489,75 @@ static void cmdECHO(struct conn *conn, struct args *args) {
     }
 }
 
+ssize_t parse_resp(const char *bytes, size_t len, struct args *args);
+ssize_t parse_resp_telnet(const char *bytes, size_t len, struct args *args);
+
+struct monitor_ctx {
+    struct conn *conn;
+};
+
+static void monitor_work(void *udata) {
+    struct monitor_ctx *ctx = udata;
+    struct conn *conn = ctx->conn;
+    char pkt[4096];
+    conn_setnonblock(conn, false);
+    monitor_start(conn);
+    struct args args = { 0 };
+    while (1) {
+        ssize_t n = conn_read(conn, pkt, sizeof(pkt));
+        if (n <= 0) {
+            break;
+        }
+        args_clear(&args);
+        ssize_t nn;
+        if (pkt[0] == '*') {
+            nn = parse_resp(pkt, n, &args);
+        } else {
+            nn = parse_resp_telnet(pkt, n, &args);
+        }
+        if (nn != n) {
+            break;
+        }
+        if (args.len == 0) {
+            continue;
+        } else if (args_eq(&args, 0, "ping")) {
+            conn_write(conn, "+PONG\r\n", 7);
+        } else {
+            break;
+        }
+    }
+    args_free(&args);
+    monitor_stop(conn);
+    conn_setnonblock(conn, false);
+}
+
+static void monitor_done(struct conn *conn, void *udata) {
+    struct dbg_detach_ctx *ctx = udata;
+    xfree(ctx);
+    conn_close(conn);
+}
+
+
+static void cmdMONITOR(struct conn *conn, struct args *args) {
+    if (conn_proto(conn) != PROTO_RESP) {
+        conn_write_error(conn, "unavailable");
+        return;
+    }
+    if (args->len != 1) {
+        conn_write_error(conn, ERR_WRONG_NUM_ARGS);
+        return;
+    }
+    conn_write_string(conn, "OK");
+    struct monitor_ctx *ctx = xmalloc(sizeof(struct monitor_ctx));
+    memset(ctx, 0, sizeof(struct monitor_ctx));
+    ctx->conn = conn;
+    if (!conn_bgwork(conn, monitor_work, monitor_done, ctx)) {
+        conn_write_error(conn, "ERR failed to do work");
+        xfree(ctx);
+    }
+
+}
+
 static void cmdPING(struct conn *conn, struct args *args) {
     if (args->len > 2) {
         conn_write_error(conn, ERR_WRONG_NUM_ARGS);
@@ -1390,9 +1610,16 @@ static void cmdTOUCH(struct conn *conn, struct args *args) {
             stat_touch_misses_incr(conn);
         }
     }
-    if (conn_proto(conn) == PROTO_POSTGRES) {
+    int proto = conn_proto(conn);
+    if (proto == PROTO_POSTGRES) {
         pg_write_completef(conn, "TOUCH %" PRIi64, touched);
         pg_write_ready(conn, 'I');
+    } else if (proto == PROTO_MEMCACHE) {
+        if (touched > 0) {
+            conn_write_raw_cstr(conn, "TOUCHED\r\n");
+        } else {
+            conn_write_raw_cstr(conn, "NOT_FOUND\r\n");
+        }
     } else {
         conn_write_int(conn, touched);
     }
@@ -1498,7 +1725,8 @@ static void execINCRDECR(struct conn *conn, const char *key, size_t keylen,
         goto done;
     }
     assert(status == POGOCACHE_INSERTED || status == POGOCACHE_REPLACED);
-    if (conn_proto(conn) == PROTO_POSTGRES) {
+    int proto = conn_proto(conn);
+    if (proto == PROTO_POSTGRES) {
         char val[24];
         if (isunsigned) {
             snprintf(val, sizeof(val), "%" PRIu64, ctx.uval);
@@ -1511,6 +1739,9 @@ static void execINCRDECR(struct conn *conn, const char *key, size_t keylen,
             conn_write_uint(conn, ctx.uval);
         } else {
             conn_write_int(conn, ctx.ival);
+        }
+        if (proto == PROTO_MEMCACHE) {
+            conn_write_raw_cstr(conn, "\r\n");
         }
     }
     hit = true;
@@ -1826,6 +2057,8 @@ static void stats(struct conn *conn) {
     stats_printf(&stats, "version %s", version);
     stats_printf(&stats, "githash %s", githash);
     stats_printf(&stats, "pointer_size %zu", sizeof(uintptr_t)*8);
+#ifdef __EMSCRIPTEN__
+#else
     struct rusage usage;
     if (getrusage(RUSAGE_SELF, &usage) == 0) {
         stats_printf(&stats, "rusage_user %ld.%06ld",
@@ -1833,6 +2066,7 @@ static void stats(struct conn *conn) {
         stats_printf(&stats, "rusage_system %ld.%06ld",
             usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
     }
+#endif
     stats_printf(&stats, "max_connections %zu", maxconns);
     stats_printf(&stats, "curr_connections %zu", net_nconns());
     stats_printf(&stats, "total_connections %zu", net_tconns());
@@ -1868,11 +2102,178 @@ static void stats(struct conn *conn) {
 
 static void cmdSTATS(struct conn *conn, struct args *args) {
     if (args->len == 1) {
-        return stats(conn);
+        stats(conn);
+        return;
     }
     conn_write_error(conn, ERR_SYNTAX_ERROR);
     return;
 }
+
+static void cmdVERSION(struct conn *conn, struct args *args) {
+    (void)args;
+    int proto = conn_proto(conn);
+    if (proto == PROTO_MEMCACHE) {
+        conn_write_raw_cstr(conn, "VERSION ");
+        conn_write_raw_cstr(conn, version);
+        conn_write_raw_cstr(conn, "\r\n");
+    } else if (proto == PROTO_POSTGRES) {
+        pg_write_row_desc(conn, (const char*[]){ "version" }, 1);
+            pg_write_row_data(conn, (const char*[]){ version },
+                (size_t[]){ strlen(version) }, 1);
+        pg_write_completef(conn, "VERSION 1");
+        pg_write_ready(conn, 'I');
+    } else {
+        conn_write_string(conn, version);
+    }
+}
+
+struct scan_ctx {
+    char *pattern;
+    size_t plen;
+    int64_t now;
+    size_t count;
+    uint64_t cursor;
+    struct pogocache_entry **entries;
+    size_t len;
+    size_t cap;
+};
+
+static void scan_ctx_free(struct scan_ctx *ctx) {
+    if (ctx) {
+        xfree(ctx->entries);
+        xfree(ctx->pattern);
+        xfree(ctx);
+    }
+}
+
+static void scan_work(void *udata) {
+    struct scan_ctx *ctx = udata;
+    while (ctx->len < ctx->count) {
+        struct pogocache_entry *entry;
+        entry = pogocache_entry_iter(cache, ctx->now, &ctx->cursor);
+        if (!entry) {
+            break;
+        }
+        char buf[128];
+        size_t keylen;
+        const void *key = pogocache_entry_key(cache, entry, &keylen, buf);
+        if (match(ctx->pattern, ctx->plen, key, keylen, 0)) {
+            if (ctx->len == ctx->cap) {
+                ctx->cap = ctx->cap ? ctx->cap * 2 : 16;
+                ctx->entries = xrealloc(ctx->entries, sizeof(void*)*ctx->cap);
+            }
+            ctx->entries[ctx->len++] = entry;
+        } else {
+            pogocache_entry_release(cache, entry);
+        }
+    }
+}
+
+static void scan_done(struct conn *conn, void *udata) {
+    struct scan_ctx *ctx = udata;
+    int proto = conn_proto(conn);
+    char scursor[32];
+    size_t clen = u64toa(ctx->cursor, (uint8_t*)scursor);
+    if (proto == PROTO_POSTGRES) {
+        pg_write_row_desc(conn, (const char*[]){ "key", "cursor" }, 2);
+    } else {
+        conn_write_array(conn, 2);
+        conn_write_bulk_cstr(conn, scursor);
+        conn_write_array(conn, ctx->len);
+    }
+    for (size_t i = 0; i < ctx->len; i++) {
+        struct pogocache_entry *entry = ctx->entries[i];
+        char buf[128];
+        size_t keylen;
+        const void *key = pogocache_entry_key(cache, entry, &keylen, buf);
+        if (proto == PROTO_POSTGRES) {
+            pg_write_row_data(conn, (const char*[]){ key, scursor },
+                (size_t[]){ keylen, clen }, 2);
+        } else {
+            conn_write_bulk(conn, key, keylen);
+        }
+        pogocache_entry_release(cache, entry);
+    }
+    if (proto == PROTO_POSTGRES) {
+        pg_write_completef(conn, "SCAN %zu", ctx->len);
+        pg_write_ready(conn, 'I');
+    }
+    scan_ctx_free(ctx);
+}
+
+// SCAN cursor [MATCH pattern] [COUNT count] [TYPE type]
+static void cmdSCAN(struct conn *conn, struct args *args) {
+    if (args->len < 2) {
+        conn_write_error(conn, ERR_WRONG_NUM_ARGS);
+        return;
+    }
+    size_t count = 100;
+    const char *stype = "string";
+    const void *pattern = "*";
+    size_t plen = 1;
+    uint64_t cursor;
+    if (!argu64(args, 1, &cursor)) {
+        conn_write_error(conn, "ERR invalid cursor");
+        return;
+    }
+    for (size_t i = 2; i < args->len; i++) {
+        if (argeq(args, i, "match")) {
+            i++;
+            if (i == args->len) {
+                goto err_syntax;
+            }
+            pattern = args->bufs[i].data;
+            plen = args->bufs[i].len;
+        } else if (argeq(args, i, "count")) {
+            i++;
+            if (i == args->len) {
+                goto err_syntax;
+            }
+            uint64_t x;
+            if (!argu64(args, i, &x) || x == 0 || x > INT32_MAX) {
+                goto err_syntax;
+            }
+            count = x;
+        } else if (argeq(args, i, "type")) {
+            i++;
+            if (i == args->len) {
+                goto err_syntax;
+            }
+            if (argeq(args, i, "string")) {
+                stype = "string";
+            } else {
+                char str[128];
+                snprintf(str, sizeof(str), "ERR unknown type name '%.*s'",
+                    (int)args->bufs[i].len, args->bufs[i].data);
+                conn_write_error(conn, str);
+                return;
+            }
+        } else {
+            goto err_syntax;
+        }
+    }
+    (void)stype;
+    int64_t now = sys_now();
+    struct scan_ctx *ctx = xmalloc(sizeof(struct scan_ctx));
+    memset(ctx, 0, sizeof(struct scan_ctx));
+    ctx->pattern = xmalloc(plen+1);
+    memcpy(ctx->pattern, pattern, plen);
+    ctx->pattern[plen] = '\0';
+    ctx->plen = plen;
+    ctx->count = count;
+    ctx->now = now;
+    ctx->cursor = cursor;
+
+    // call in the foreground
+    scan_work(ctx);
+    scan_done(conn, ctx);
+    
+    return;
+err_syntax:
+    conn_write_error(conn, ERR_SYNTAX_ERROR);
+    return;
+}
+
 
 // Commands hash table. Lazy loaded per thread.
 // Simple open addressing using case-insensitive fnv1a hashes.
@@ -1901,9 +2302,11 @@ static struct cmd cmds[] = {
     { "flushdb",   cmdFLUSHALL }, // pg
     { "flushall",  cmdFLUSHALL }, // pg
     { "flush",     cmdFLUSHALL }, // pg
+    { "monitor",   cmdMONITOR  }, // pg not available
     { "purge",     cmdPURGE    }, // pg
     { "sweep",     cmdSWEEP    }, // pg
     { "keys",      cmdKEYS     }, // pg
+    { "select",    cmdSELECT   }, // pg
     { "ping",      cmdPING     }, // pg
     { "touch",     cmdTOUCH    }, // pg
     { "debug",     cmdDEBUG    }, // pg
@@ -1921,6 +2324,8 @@ static struct cmd cmds[] = {
     { "save",      cmdSAVELOAD }, // pg
     { "load",      cmdSAVELOAD }, // pg
     { "stats",     cmdSTATS    }, // pg memcache style stats
+    { "version",   cmdVERSION  }, // pg
+    { "scan",      cmdSCAN     }, // pg
 };
 
 static void build_commands_table(void) {
@@ -1981,22 +2386,25 @@ void evcommand(struct conn *conn, struct args *args) {
             return;
         }
     }
-    if (verb > 1) {
+    if (verb >= 3) {
         if (!argeq(args, 0, "auth")) {
             args_print(args);
         }
     }
+
     struct cmd *cmd = get_cmd(args->bufs[0].data, args->bufs[0].len);
     if (cmd) {
+        monitor_cmd(sys_unixnow(), 0, conn_addr(conn), args);
         cmd->func(conn, args);
     } else {
-        if (verb > 0) {
+        char *errmsg = xmalloc(256);
+        snprintf(errmsg, 256, "ERR unknown command '%.*s'",
+            (int)args->bufs[0].len, args->bufs[0].data);
+        conn_write_error(conn, errmsg);
+        xfree(errmsg);
+        if (verb >= 1) {
             printf("# Unknown command '%.*s'\n", (int)args->bufs[0].len,
                 args->bufs[0].data);
         }
-        char errmsg[128];
-        snprintf(errmsg, sizeof(errmsg), "ERR unknown command '%.*s'", 
-            (int)args->bufs[0].len, args->bufs[0].data);
-        conn_write_error(conn, errmsg);
     }
 }
