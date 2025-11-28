@@ -12,11 +12,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: test
       run: make test
-    # - name: Docker push
-    #   env:
-    #     DOCKER_LOGIN: tidwall
-    #     DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-    #   run: ./tools/docker-push.sh
