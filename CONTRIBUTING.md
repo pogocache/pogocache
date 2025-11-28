@@ -4,11 +4,10 @@ Thanks for your interest in improving Pogocache!
 
 ## Issues
 - **Found a bug?** Please open an issue with a clear description and precise steps to reproduce.
-- **New features.** New features generally require prior discussion. If you or your company needs a specialized feature, please state your willingness to fund the work and ongoing maintenance.
 
 ## Pull Requests
 - **Scope.** PRs are welcome for bug fixes and small, low-risk changes.
-- **Please coordinate first.** For large changes, such as new features, please file an issue and/or discuss it with maintainer beforehand.
+- **Please coordinate first.** For large changes, such as new features, please file an issue and/or discuss it with a maintainer beforehand.
 - **Quality.** Keep PRs focused, include tests (where applicable), and update docs.
 
 ## Ownership & Licensing
@@ -17,7 +16,7 @@ Thanks for your interest in improving Pogocache!
     ```text
     // Copyright 2025 Polypoint Labs, LLC. All rights reserved.
     // This file is part of the Pogocache project.
-    // Use of this source code is governed by the AGPL that can be found in
+    // Use of this source code is governed by the MIT that can be found in
     // the LICENSE file.
     ```
 - You may explicitly retain ownership by,

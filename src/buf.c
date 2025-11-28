@@ -2,7 +2,7 @@
 //
 // Copyright 2025 Polypoint Labs, LLC. All rights reserved.
 // This file is part of the Pogocache project.
-// Use of this source code is governed by the AGPL that can be found in
+// Use of this source code is governed by the MIT that can be found in
 // the LICENSE file.
 //
 // For alternative licensing options or general questions, please contact

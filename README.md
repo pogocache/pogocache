@@ -642,7 +642,7 @@ Next steps are:
 
 ## License
 
-Pogocache is free & open source software released under the terms of the AGPL license. The Pogocache source code was written and copyrighted by Polypoint Labs, LLC. 
+Pogocache is free & open source software released under the terms of the MIT license. The Pogocache source code was written and copyrighted by Polypoint Labs, LLC. 
 
 For alternative licensing options, please contact us at licensing@polypointlabs.com.
 
